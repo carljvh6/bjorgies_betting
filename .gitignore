@@ -1,3 +1,75 @@
+### Python
 __pycache__/
+*.py[cod]
+.Python
 .venv/
+venv/
+
+### Node / JS
+node_modules/
+**/node_modules/
+.npm-cache/
+**/.npm-cache/
+.pnpm-store/
+**/.pnpm-store/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+### Build / tooling outputs
+dist/
+**/dist/
+dist-ssr/
+**/dist-ssr/
+build/
+**/build/
+coverage/
+**/coverage/
+.vite/
+**/.vite/
+.parcel-cache/
+**/.parcel-cache/
+.turbo/
+**/.turbo/
+.next/
+**/.next/
+out/
+**/out/
+.svelte-kit/
+**/.svelte-kit/
+
+### Environment files (keep examples)
+.env
+.env.*
+!.env.example
+
+### Firebase / emulator artifacts
+.firebase/
+**/.firebase/
+.emulators/
+**/.emulators/
+firebase-debug.log*
+firestore-debug.log*
+database-debug.log*
+pubsub-debug.log*
+ui-debug.log*
+*-debug.log*
+
+### Editor / OS junk
+.cursor/
+**/.cursor/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+**/.idea/
+.DS_Store
+Thumbs.db
+
+### Local app/session secrets
 .sesskey
