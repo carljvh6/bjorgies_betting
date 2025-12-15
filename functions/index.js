@@ -2,11 +2,27 @@ const { setGlobalOptions } = require("firebase-functions/v2");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { FieldValue } = require("firebase-admin/firestore");
+const { randomUUID } = require("crypto");
 
-admin.initializeApp();
+function buildAppConfig() {
+  try {
+    const cfg = JSON.parse(process.env.FIREBASE_CONFIG || "{}");
+    const appConfig = {};
+    if (cfg.projectId) appConfig.projectId = cfg.projectId;
+    if (cfg.storageBucket) appConfig.storageBucket = cfg.storageBucket;
+    return appConfig;
+  } catch (err) {
+    console.warn("Failed to parse FIREBASE_CONFIG", err);
+    return {};
+  }
+}
+
+admin.initializeApp(buildAppConfig());
 const db = admin.firestore();
 
 setGlobalOptions({ region: "us-central1" });
+
+const STARTING_BALANCE = 1000;
 
 async function requireAdmin(tx, uid) {
   const userRef = db.collection("users").doc(uid);
@@ -20,23 +36,217 @@ exports.ensureUser = onCall(async (request) => {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
 
+  const authToken = request.auth?.token || {};
+  const authName = typeof authToken.name === "string" ? authToken.name : null;
+  const authEmail = typeof authToken.email === "string" ? authToken.email : null;
+  const authPicture = typeof authToken.picture === "string" ? authToken.picture : null;
+
   const userRef = db.collection("users").doc(uid);
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(userRef);
     if (!snap.exists) {
       tx.set(userRef, {
-        balance: 1000,
+        balance: STARTING_BALANCE,
         role: "user",
+        approved: false,
+        approvedAt: null,
+        approvedBy: null,
+        group: null,
+        displayName: authName,
+        email: authEmail,
+        photoURL: authPicture,
         createdAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
     } else {
-      tx.update(userRef, { updatedAt: FieldValue.serverTimestamp() });
+      const patch = {
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      if (authName) patch.displayName = authName;
+      if (authEmail) patch.email = authEmail;
+      if (authPicture) patch.photoURL = authPicture;
+      tx.set(userRef, patch, { merge: true });
     }
   });
 
   const snap = await userRef.get();
-  return { balance: snap.data()?.balance };
+  return {
+    balance: snap.data()?.balance,
+    group: snap.data()?.group ?? null,
+    approved: Boolean(snap.data()?.approved),
+    role: snap.data()?.role || "user",
+  };
+});
+
+exports.setGroup = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
+
+  const raw = request.data?.group;
+  const group = typeof raw === "string" ? raw.trim() : "";
+
+  // Allow clearing group with empty string.
+  if (group) {
+    if (group.length > 32) throw new HttpsError("invalid-argument", "group too long (max 32)");
+    if (!/^[a-zA-Z0-9 _-]+$/.test(group)) {
+      throw new HttpsError("invalid-argument", "group contains invalid characters");
+    }
+  }
+
+  const userRef = db.collection("users").doc(uid);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(userRef);
+    if (!snap.exists) throw new HttpsError("failed-precondition", "User not initialized (call ensureUser)");
+    tx.set(
+      userRef,
+      {
+        group: group || null,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+
+  return { group: group || null };
+});
+
+exports.listPendingUsers = onCall(async (request) => {
+  try {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
+
+    // Admin check (server-side; not governed by Firestore rules).
+    await db.runTransaction(async (tx) => {
+      await requireAdmin(tx, uid);
+    });
+
+    // Avoid requiring a composite index by NOT ordering in Firestore.
+    // We'll sort client-side using createdAt (if present).
+    const snap = await db.collection("users").where("approved", "==", false).limit(200).get();
+
+    const users = snap.docs
+      .map((d) => {
+        const data = d.data() || {};
+        return {
+          uid: d.id,
+          displayName: data.displayName || null,
+          email: data.email || null,
+          createdAt: data.createdAt || null,
+          group: data.group || null,
+        };
+      })
+      .sort((a, b) => {
+        const at = a.createdAt?.toDate?.()?.getTime?.() ?? 0;
+        const bt = b.createdAt?.toDate?.()?.getTime?.() ?? 0;
+        return at - bt;
+      })
+      .slice(0, 100);
+
+    return { users };
+  } catch (err) {
+    console.error("listPendingUsers error", err);
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError("internal", err?.message || "Failed to list pending users");
+  }
+});
+
+exports.approveUser = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
+
+  const targetUid = String(request.data?.uid || "").trim();
+  if (!targetUid) throw new HttpsError("invalid-argument", "uid required");
+
+  const targetUserRef = db.collection("users").doc(targetUid);
+  const targetProfileRef = db.collection("profiles").doc(targetUid);
+
+  await db.runTransaction(async (tx) => {
+    await requireAdmin(tx, uid);
+
+    const targetSnap = await tx.get(targetUserRef);
+    if (!targetSnap.exists) throw new HttpsError("not-found", "Target user not found");
+
+    tx.set(
+      targetUserRef,
+      {
+        approved: true,
+        approvedAt: FieldValue.serverTimestamp(),
+        approvedBy: uid,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    // Optional: mark profile as approved too (client can’t write this field).
+    tx.set(
+      targetProfileRef,
+      {
+        approved: true,
+        approvedAt: FieldValue.serverTimestamp(),
+        approvedBy: uid,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+
+  return { ok: true };
+});
+
+exports.uploadProfilePhoto = onCall(async (request) => {
+  try {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
+
+    const { imageData, contentType } = request.data || {};
+    if (typeof imageData !== "string" || !imageData) {
+    throw new HttpsError("invalid-argument", "imageData (base64) required");
+  }
+  const safeContentType =
+    typeof contentType === "string" && contentType.startsWith("image/") ? contentType : "image/jpeg";
+
+  let buffer;
+  try {
+    buffer = Buffer.from(imageData, "base64");
+  } catch {
+    throw new HttpsError("invalid-argument", "imageData must be valid base64");
+  }
+
+  if (buffer.length === 0) throw new HttpsError("invalid-argument", "Image is empty");
+  if (buffer.length > 2 * 1024 * 1024) {
+    throw new HttpsError("invalid-argument", "Image exceeds 2MB limit");
+  }
+
+    const appBucket =
+      admin.app().options?.storageBucket ||
+      process.env.FIREBASE_STORAGE_BUCKET ||
+      (process.env.GCLOUD_PROJECT ? `${process.env.GCLOUD_PROJECT}.appspot.com` : null);
+    if (!appBucket) throw new HttpsError("failed-precondition", "Storage bucket not configured");
+
+    const bucket = admin.storage().bucket(appBucket);
+    const ext = safeContentType.split("/")[1] || "jpg";
+    const filePath = `profiles/${uid}/avatar_${Date.now()}_${randomUUID().slice(0, 8)}.${ext}`;
+    const downloadToken = randomUUID();
+
+    await bucket.file(filePath).save(buffer, {
+    metadata: {
+      contentType: safeContentType,
+      metadata: {
+        firebaseStorageDownloadTokens: downloadToken,
+      },
+    },
+  });
+
+    const photoURL = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(
+      filePath
+    )}?alt=media&token=${downloadToken}`;
+
+    return { photoURL, path: filePath };
+  } catch (err) {
+    console.error("uploadProfilePhoto error", err);
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError("internal", err?.message || "Failed to upload photo");
+  }
 });
 
 exports.placeBet = onCall(async (request) => {
@@ -69,6 +279,9 @@ exports.placeBet = onCall(async (request) => {
     if (existingBet.exists) throw new HttpsError("already-exists", "Bet already placed for this market");
     if (!marketSnapTx.exists) throw new HttpsError("not-found", "Market not found");
     if (!userSnap.exists) throw new HttpsError("failed-precondition", "User not initialized (call ensureUser)");
+    if (userSnap.data()?.approved !== true) {
+      throw new HttpsError("permission-denied", "Awaiting admin approval");
+    }
 
     const marketTx = marketSnapTx.data();
     if (marketTx.status !== "open") throw new HttpsError("failed-precondition", "Market not open");

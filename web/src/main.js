@@ -1,9 +1,10 @@
 import "./style.css";
 import { db, auth, provider, fns } from "./firebase";
-import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { signInWithPopup, signOut, onAuthStateChanged, updateProfile } from "firebase/auth";
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   orderBy,
@@ -17,15 +18,21 @@ import { httpsCallable } from "firebase/functions";
 
 
 let currentUser = null;
+let currentProfile = null;
 let currentView = "dashboard"; // "dashboard" | "profile"
 let unsubscribeUpcomingEvents = null;
 let unsubscribeEventMarkets = null;
 let unsubscribeAccount = null;
 let unsubscribePendingBets = null;
 let unsubscribeUserDoc = null;
+let unsubscribeGroupLeaderboard = null;
+let groupLeaderboardGroup = null;
 let currentBalance = null;
+let currentGroup = null;
 let headerAccountMetaEl = null;
 const eventsCache = new Map(); // eventId -> event data
+
+const STARTING_BALANCE = 1000;
 
 const appEl = document.querySelector("#app");
 appEl.innerHTML = `
@@ -83,6 +90,22 @@ function clearUserDocListener() {
   }
   unsubscribeUserDoc = null;
   currentBalance = null;
+  currentGroup = null;
+}
+
+function clearGroupLeaderboardListener() {
+  if (typeof unsubscribeGroupLeaderboard === "function") {
+    unsubscribeGroupLeaderboard();
+  }
+  unsubscribeGroupLeaderboard = null;
+  groupLeaderboardGroup = null;
+}
+
+async function fetchProfile(uid) {
+  if (!uid) return null;
+  const snap = await getDoc(doc(db, "profiles", uid));
+  if (!snap.exists()) return null;
+  return { id: snap.id, ...snap.data() };
 }
 
 function updateHeaderMeta() {
@@ -153,17 +176,24 @@ function renderLoggedOut() {
   clearProfileListeners();
   clearUserDocListener();
   currentUser = null;
+  currentProfile = null;
   currentView = "dashboard";
 
   authAreaEl.innerHTML = `
-    <button id="login">Login</button>
+    <div style="display:flex; gap: 8px;">
+      <button id="login">Login</button>
+      <button id="signupStart">Sign up</button>
+    </div>
   `;
 
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
       <h1 style="margin: 0 0 8px 0; font-size: 42px; line-height: 1.1;">Welcome to Bjorgies betting</h1>
-      <div style="opacity: 0.85; margin-bottom: 16px;">Sign in to see the upcoming events.</div>
-      <button id="login2">Sign in with Google</button>
+      <div style="opacity: 0.85; margin-bottom: 16px;">Sign in or sign up with Google to see the upcoming events.</div>
+      <div style="display:flex; gap: 12px; flex-wrap: wrap;">
+        <button id="login2">Login with Google</button>
+        <button id="signup2">Sign up with Google</button>
+      </div>
     </section>
   `;
 
@@ -181,6 +211,130 @@ function renderLoggedOut() {
 
   document.querySelector("#login").onclick = login;
   document.querySelector("#login2").onclick = login;
+  document.querySelector("#signupStart").onclick = login;
+  document.querySelector("#signup2").onclick = login;
+}
+
+function renderSignup(user) {
+  clearUpcomingEventsListener();
+  clearEventMarketsListener();
+  clearProfileListeners();
+  clearUserDocListener();
+  clearGroupLeaderboardListener();
+  currentUser = user;
+  currentView = "signup";
+  currentProfile = null;
+
+  authAreaEl.innerHTML = `
+    <div style="text-align:right;">
+      <div style="font-weight: 650;">${user.email || "Signed in"}</div>
+      <div style="opacity: 0.75; font-size: 12px;">Complete signup</div>
+    </div>
+    <button id="logout">Logout</button>
+  `;
+
+  document.querySelector("#logout").onclick = async () => {
+    await signOut(auth);
+  };
+
+  const defaultDisplayName = user.displayName || "";
+  const defaultPhoto = user.photoURL || "";
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 34px;">Create your profile</h1>
+      <div style="opacity: 0.85; margin-bottom: 16px;">Choose how you’ll appear to others before placing bets.</div>
+      <form id="signupForm" style="display:flex; flex-direction:column; gap: 16px;">
+        <label style="display:flex; flex-direction:column; gap: 6px;">
+          <span style="font-weight: 600;">Display name</span>
+          <input id="signupDisplayName" type="text" maxlength="40" placeholder="e.g. Bjorg" value="${defaultDisplayName}" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);" required />
+        </label>
+
+        <label style="display:flex; flex-direction:column; gap: 6px;">
+          <span style="font-weight: 600;">Group</span>
+          <input id="signupGroup" type="text" maxlength="32" placeholder="e.g. boys_trip_2025" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);" />
+          <div style="opacity:0.75; font-size: 12px;">Optional. People with the same group can see a shared leaderboard.</div>
+        </label>
+
+        <div id="signupMsg"></div>
+
+        <button id="signupSubmit" type="submit" style="align-self:flex-start;">Create profile</button>
+      </form>
+    </section>
+  `;
+
+  const displayNameInput = document.querySelector("#signupDisplayName");
+  const groupInput = document.querySelector("#signupGroup");
+  const previewImg = null;
+  const previewPlaceholder = null;
+  const signupForm = document.querySelector("#signupForm");
+  const signupMsgEl = document.querySelector("#signupMsg");
+  const submitBtn = document.querySelector("#signupSubmit");
+  let activePreviewUrl = "";
+
+  const showPreview = () => {};
+
+  signupForm.onsubmit = async (e) => {
+    e.preventDefault();
+    signupMsgEl.innerHTML = "";
+    const displayName = displayNameInput.value.trim();
+    const group = String(groupInput?.value || "").trim();
+    if (!displayName) {
+      signupMsgEl.innerHTML = `<div style="color:#b00020;">Display name is required.</div>`;
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Creating…";
+
+    try {
+      const uploadedPhotoUrl = defaultPhoto || "";
+
+      const profileRef = doc(db, "profiles", user.uid);
+      await setDoc(profileRef, {
+        displayName,
+        email: user.email || null,
+        photoURL: uploadedPhotoUrl || null,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      try {
+        await updateProfile(user, {
+          displayName,
+          photoURL: uploadedPhotoUrl || null,
+        });
+      } catch (err) {
+        console.warn("Failed to update auth profile", err);
+      }
+
+      const ensureUserFn = httpsCallable(fns, "ensureUser");
+      await ensureUserFn();
+
+      if (group) {
+        const setGroup = httpsCallable(fns, "setGroup");
+        await setGroup({ group });
+      }
+
+      currentProfile = {
+        displayName,
+        email: user.email || null,
+        photoURL: uploadedPhotoUrl || null,
+      };
+      currentView = "dashboard";
+
+      signupMsgEl.innerHTML = `<div style="color:#0a7a2f;">Profile created. Redirecting…</div>`;
+      setTimeout(() => {
+        renderAwaitingApproval(user, currentProfile);
+      }, 300);
+    } catch (err) {
+      console.error(err);
+      signupMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Create profile";
+    }
+  };
 }
 
 function renderDashboard(user) {
@@ -273,6 +427,14 @@ function renderDashboard(user) {
 function renderProfile(user) {
   clearProfileListeners();
   clearEventMarketsListener();
+  clearGroupLeaderboardListener();
+  const profileName = currentProfile?.displayName || user.displayName || user.email || "Your profile";
+  const profileEmail = currentProfile?.email || user.email || "";
+  const profilePhoto = currentProfile?.photoURL || user.photoURL || "";
+  const fallbackInitial = profileName?.charAt?.(0)?.toUpperCase?.() || "?";
+  const avatarInner = profilePhoto
+    ? `<img src="${profilePhoto}" alt="${profileName}" style="width:100%; height:100%; object-fit:cover;" />`
+    : `<div style="font-size:24px; font-weight:700; color:#213547;">${fallbackInitial}</div>`;
 
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
@@ -284,9 +446,42 @@ function renderProfile(user) {
         <button id="backToEvents">Back to events</button>
       </div>
 
+      <div style="margin-top: 16px; display:flex; align-items:center; gap: 14px; padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+        <div style="width: 72px; height: 72px; border-radius: 20px; background: rgba(127,127,127,0.15); display:flex; align-items:center; justify-content:center; overflow:hidden;">
+          ${avatarInner}
+        </div>
+        <div>
+          <div style="font-size: 20px; font-weight: 750;">${profileName}</div>
+          ${profileEmail ? `<div style="opacity:0.75;">${profileEmail}</div>` : ""}
+        </div>
+      </div>
+
       <div style="margin-top: 16px; padding: 14px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
         <div style="opacity: 0.8; font-size: 12px;">Balance</div>
         <div id="balanceVal" style="font-size: 36px; font-weight: 850; letter-spacing: -0.02em; margin-top: 4px;">-</div>
+      </div>
+
+      <div style="margin-top: 16px; padding: 14px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+        <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+          <div>
+            <div style="font-size: 16px; font-weight: 750;">Group</div>
+            <div id="groupHint" style="opacity: 0.8; margin-top: 4px; font-size: 12px;">Set a group to see your group leaderboard.</div>
+          </div>
+        </div>
+        <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap: wrap; align-items:center;">
+          <input id="groupInput" type="text" maxlength="32" placeholder="e.g. boys_trip_2025" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 260px;" />
+          <button id="saveGroup">Save group</button>
+          <button id="clearGroup" style="opacity:0.9;">Clear</button>
+        </div>
+        <div id="groupMsg" style="margin-top: 10px;"></div>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+          <div style="font-size: 16px; font-weight: 750;">Group leaderboard</div>
+          <div id="groupLbStatus" style="opacity: 0.8;"></div>
+        </div>
+        <div id="groupLbList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 10px;"></div>
       </div>
 
       <div style="margin-top: 16px;">
@@ -296,16 +491,166 @@ function renderProfile(user) {
         </div>
         <div id="pendingList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 12px;"></div>
       </div>
+
+      <div id="adminPanel" style="margin-top: 16px; padding: 14px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; display:none;">
+        <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+          <div>
+            <div style="font-size: 16px; font-weight: 850;">Admin: pending approvals</div>
+            <div style="opacity: 0.8; margin-top: 4px; font-size: 12px;">Approve new signups so they can use the app.</div>
+          </div>
+          <button id="refreshPending">Refresh</button>
+        </div>
+        <div id="pendingApprovalsStatus" style="opacity:0.8; margin-top: 10px;"></div>
+        <div id="pendingApprovalsList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 10px;"></div>
+      </div>
     </section>
   `;
 
   document.querySelector("#backToEvents").onclick = () => setView("dashboard", user);
 
   const balanceValEl = document.querySelector("#balanceVal");
+  const groupHintEl = document.querySelector("#groupHint");
+  const groupInputEl = document.querySelector("#groupInput");
+  const groupMsgEl = document.querySelector("#groupMsg");
+  const groupLbStatusEl = document.querySelector("#groupLbStatus");
+  const groupLbListEl = document.querySelector("#groupLbList");
   const pendingStatusEl = document.querySelector("#pendingStatus");
   const pendingListEl = document.querySelector("#pendingList");
+  const adminPanelEl = document.querySelector("#adminPanel");
+  const pendingApprovalsStatusEl = document.querySelector("#pendingApprovalsStatus");
+  const pendingApprovalsListEl = document.querySelector("#pendingApprovalsList");
 
   pendingStatusEl.textContent = "Loading…";
+  groupLbStatusEl.textContent = "";
+  groupLbListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">Set a group to see your leaderboard.</div>`;
+
+  const loadPendingApprovals = async () => {
+    pendingApprovalsStatusEl.textContent = "Loading…";
+    pendingApprovalsListEl.innerHTML = "";
+    try {
+      const listPendingUsers = httpsCallable(fns, "listPendingUsers");
+      const res = await listPendingUsers();
+      const users = Array.isArray(res.data?.users) ? res.data.users : [];
+      pendingApprovalsStatusEl.textContent = `${users.length} pending`;
+
+      if (users.length === 0) {
+        pendingApprovalsListEl.innerHTML = `<div style="opacity:0.8; padding: 10px 0;">No pending approvals.</div>`;
+        return;
+      }
+
+      const html = users.map((u) => {
+        const uid = String(u.uid || "");
+        const name = String(u.displayName || "").trim() || String(u.email || "").trim() || uid;
+        const group = String(u.group || "").trim();
+        return `
+          <article data-pending-uid="${uid}" style="padding: 10px 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+            <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap; align-items:center;">
+              <div>
+                <div style="font-weight: 750;">${name}</div>
+                <div style="opacity:0.8; font-size: 12px;">uid: ${uid}${group ? ` • group: ${group}` : ""}</div>
+              </div>
+              <button data-approve-btn="1" data-uid="${uid}">Approve</button>
+            </div>
+          </article>
+        `;
+      });
+      pendingApprovalsListEl.innerHTML = html.join("");
+    } catch (err) {
+      console.error(err);
+      pendingApprovalsStatusEl.textContent = "Failed to load";
+      pendingApprovalsListEl.innerHTML = `<div style="color:#b00020; padding: 10px 0;">${err?.code || "error"}: ${
+        err?.message || String(err)
+      }</div>`;
+    }
+  };
+
+  document.querySelector("#refreshPending").onclick = loadPendingApprovals;
+  pendingApprovalsListEl.onclick = async (e) => {
+    const btn = e.target?.closest?.("[data-approve-btn]");
+    if (!btn) return;
+    const uid = btn.getAttribute("data-uid");
+    if (!uid) return;
+    btn.disabled = true;
+    btn.textContent = "Approving…";
+    try {
+      const approveUser = httpsCallable(fns, "approveUser");
+      await approveUser({ uid });
+      await loadPendingApprovals();
+    } catch (err) {
+      console.error(err);
+      pendingApprovalsStatusEl.textContent = `${err?.code || "error"}: ${err?.message || String(err)}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Approve";
+    }
+  };
+
+  const startGroupLeaderboard = (group) => {
+    groupMsgEl.innerHTML = "";
+    if (!group) {
+      clearGroupLeaderboardListener();
+      groupHintEl.textContent = "Set a group to see your group leaderboard.";
+      groupLbStatusEl.textContent = "";
+      groupLbListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">Set a group to see your leaderboard.</div>`;
+      return;
+    }
+
+    groupHintEl.textContent = `Group: ${group}`;
+    if (groupLeaderboardGroup === group && typeof unsubscribeGroupLeaderboard === "function") {
+      return;
+    }
+
+    clearGroupLeaderboardListener();
+    groupLeaderboardGroup = group;
+    groupLbStatusEl.textContent = "Loading…";
+    groupLbListEl.innerHTML = "";
+
+    const q = query(collection(db, "users"), where("group", "==", group));
+    unsubscribeGroupLeaderboard = onSnapshot(
+      q,
+      (snap) => {
+        const rows = snap.docs.map((d) => ({ uid: d.id, ...(d.data() || {}) }));
+        rows.sort((a, b) => Number(b.balance || 0) - Number(a.balance || 0));
+
+        groupLbStatusEl.textContent = `${rows.length} member${rows.length === 1 ? "" : "s"}`;
+
+        if (rows.length === 0) {
+          groupLbListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">No one is in this group yet.</div>`;
+          return;
+        }
+
+        const html = rows.map((u, idx) => {
+          const bal = Number(u.balance);
+          const balance = Number.isFinite(bal) ? bal : 0;
+          const profit = balance - STARTING_BALANCE;
+          const name =
+            String(u.displayName || "").trim() ||
+            String(u.email || "").trim() ||
+            `${String(u.uid || "").slice(0, 6)}…`;
+          const isMe = u.uid === user.uid;
+          return `
+            <article style="padding: 10px 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; ${
+              isMe ? "background: rgba(70, 130, 180, 0.10);" : ""
+            }">
+              <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+                <div style="font-weight: 750;">#${idx + 1} ${name}${isMe ? " (you)" : ""}</div>
+                <div style="opacity:0.9;">Profit: <strong>${profit}</strong> • Balance: ${balance}</div>
+              </div>
+            </article>
+          `;
+        });
+
+        groupLbListEl.innerHTML = html.join("");
+      },
+      (err) => {
+        console.error(err);
+        groupLbStatusEl.textContent = "Failed to load";
+        groupLbListEl.innerHTML = `<div style="color:#b00020; padding: 12px 0;">${err?.code || "error"}: ${
+          err?.message || String(err)
+        }</div>`;
+      }
+    );
+  };
 
   unsubscribeAccount = onSnapshot(
     doc(db, "users", user.uid),
@@ -313,12 +658,57 @@ function renderProfile(user) {
       const bal = snap.data()?.balance;
       const b = Number(bal);
       balanceValEl.textContent = Number.isFinite(b) ? String(b) : "-";
+
+      const g = snap.data()?.group;
+      currentGroup = typeof g === "string" && g ? g : null;
+      if (groupInputEl) groupInputEl.value = currentGroup || "";
+      startGroupLeaderboard(currentGroup);
+
+      const role = String(snap.data()?.role || "user");
+      if (role === "admin") {
+        adminPanelEl.style.display = "block";
+        if (!pendingApprovalsListEl.innerHTML) {
+          loadPendingApprovals();
+        }
+      } else {
+        adminPanelEl.style.display = "none";
+      }
     },
     (err) => {
       console.error(err);
       balanceValEl.textContent = "-";
     }
   );
+
+  document.querySelector("#saveGroup").onclick = async () => {
+    groupMsgEl.innerHTML = "";
+    const group = String(groupInputEl?.value || "").trim();
+    try {
+      const setGroup = httpsCallable(fns, "setGroup");
+      await setGroup({ group });
+      groupMsgEl.innerHTML = `<div style="color:#0a7a2f;">Saved.</div>`;
+    } catch (err) {
+      console.error(err);
+      groupMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(
+        err
+      )}</div>`;
+    }
+  };
+
+  document.querySelector("#clearGroup").onclick = async () => {
+    groupMsgEl.innerHTML = "";
+    try {
+      const setGroup = httpsCallable(fns, "setGroup");
+      await setGroup({ group: "" });
+      if (groupInputEl) groupInputEl.value = "";
+      groupMsgEl.innerHTML = `<div style="color:#0a7a2f;">Cleared.</div>`;
+    } catch (err) {
+      console.error(err);
+      groupMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(
+        err
+      )}</div>`;
+    }
+  };
 
   const pendingQ = query(
     collection(db, "bets"),
@@ -559,15 +949,18 @@ function renderEvent(user, eventId) {
   };
 }
 
-async function renderLoggedIn(user) {
+async function renderLoggedIn(user, profile) {
   clearUpcomingEventsListener();
   clearProfileListeners();
+  clearGroupLeaderboardListener();
   currentUser = user;
+  currentProfile = profile || null;
 
+  const profileName = currentProfile?.displayName || user.displayName || user.email || "Signed in";
   authAreaEl.innerHTML = `
     <div style="display:flex; flex-direction:column; align-items:flex-end; gap: 2px;">
       <button id="profileLink" style="all: unset; cursor: pointer; font-weight: 650; text-align: right;">
-        ${user.displayName || user.email || "Signed in"}
+        ${profileName}
       </button>
       <div id="accountMeta" style="opacity: 0.8; font-size: 12px;"></div>
     </div>
@@ -582,18 +975,17 @@ async function renderLoggedIn(user) {
   const accountMetaEl = document.querySelector("#accountMeta");
 
   try {
-    // Client-owned profile (safe to write from client).
-    const profileRef = doc(db, "profiles", user.uid);
-    await setDoc(
-      profileRef,
-      {
-        displayName: user.displayName,
-        email: user.email,
-        photoURL: user.photoURL,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+    if (currentProfile) {
+      const profileRef = doc(db, "profiles", user.uid);
+      await setDoc(
+        profileRef,
+        {
+          email: user.email || null,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
 
     // Ensure server-owned `users/{uid}` exists (balance, role, etc).
     const ensureUser = httpsCallable(fns, "ensureUser");
@@ -613,6 +1005,8 @@ async function renderLoggedIn(user) {
     (snap) => {
       const bal = Number(snap.data()?.balance);
       currentBalance = Number.isFinite(bal) ? bal : null;
+      const g = snap.data()?.group;
+      currentGroup = typeof g === "string" && g ? g : null;
       updateHeaderMeta();
 
       const profileBalEl = document.querySelector("#balanceVal");
@@ -631,7 +1025,112 @@ async function renderLoggedIn(user) {
   setView(currentView || "dashboard", user);
 }
 
+function renderAwaitingApproval(user, profile) {
+  clearUpcomingEventsListener();
+  clearEventMarketsListener();
+  clearProfileListeners();
+  clearUserDocListener();
+  clearGroupLeaderboardListener();
+  currentUser = user;
+  currentProfile = profile || null;
+  currentView = "awaitingApproval";
+
+  const profileName = currentProfile?.displayName || user.displayName || user.email || "Signed in";
+  authAreaEl.innerHTML = `
+    <div style="text-align:right;">
+      <div style="font-weight: 650;">${profileName}</div>
+      <div style="opacity: 0.75; font-size: 12px;">Awaiting approval</div>
+    </div>
+    <button id="logout">Logout</button>
+  `;
+  document.querySelector("#logout").onclick = async () => {
+    await signOut(auth);
+  };
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <h1 style="margin: 0 0 10px 0; font-size: 34px;">Awaiting admin approval</h1>
+      <div style="opacity: 0.85; margin-bottom: 14px;">
+        Your profile was created, but an admin must approve your account before you can view events or place bets.
+      </div>
+      <div id="approvalMsg" style="margin-top: 12px;"></div>
+      <div style="display:flex; gap: 10px; flex-wrap: wrap; margin-top: 12px;">
+        <button id="checkApproval">Check approval status</button>
+        <button id="logout2">Logout</button>
+      </div>
+    </section>
+  `;
+
+  document.querySelector("#logout2").onclick = async () => {
+    await signOut(auth);
+  };
+
+  const msgEl = document.querySelector("#approvalMsg");
+  document.querySelector("#checkApproval").onclick = async () => {
+    msgEl.textContent = "Checking…";
+    try {
+      const ensureUser = httpsCallable(fns, "ensureUser");
+      const res = await ensureUser();
+      const approved = Boolean(res.data?.approved);
+      if (!approved) {
+        msgEl.innerHTML = `<div style="opacity:0.85;">Still pending. Please try again later.</div>`;
+        return;
+      }
+
+      const refreshedProfile = await fetchProfile(user.uid);
+      renderLoggedIn(user, refreshedProfile || profile || null);
+    } catch (err) {
+      console.error(err);
+      msgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+    }
+  };
+}
+
 onAuthStateChanged(auth, async (user) => {
   if (!user) return renderLoggedOut();
-  return renderLoggedIn(user);
+
+  currentUser = user;
+  currentProfile = null;
+
+  authAreaEl.innerHTML = `
+    <div style="text-align:right;">
+      <div style="font-weight: 650;">Loading account…</div>
+      <div style="opacity: 0.75; font-size: 12px;">${user.email || ""}</div>
+    </div>
+    <button id="logout">Logout</button>
+  `;
+  document.querySelector("#logout").onclick = async () => {
+    await signOut(auth);
+  };
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <div>Loading your account…</div>
+    </section>
+  `;
+
+  try {
+    const profile = await fetchProfile(user.uid);
+    if (!profile) {
+      renderSignup(user);
+      return;
+    }
+
+    const ensureUser = httpsCallable(fns, "ensureUser");
+    const res = await ensureUser();
+    const approved = Boolean(res.data?.approved);
+    if (!approved) {
+      renderAwaitingApproval(user, profile);
+      return;
+    }
+
+    renderLoggedIn(user, profile);
+  } catch (err) {
+    console.error(err);
+    mainEl.innerHTML = `
+      <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+        <div style="color:#b00020;">Failed to load your profile. Please refresh or logout.</div>
+      </section>
+    `;
+  }
 });

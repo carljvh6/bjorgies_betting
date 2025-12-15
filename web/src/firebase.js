@@ -2,6 +2,7 @@ import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator } from "firebase/functions";
+import { getStorage, connectStorageEmulator } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -26,9 +27,11 @@ export const auth = getAuth(app);
 export const provider = new GoogleAuthProvider();
 export const db = getFirestore(app);
 export const fns = getFunctions(app);
+export const storage = getStorage(app);
 
 if (useEmulators) {
   // Use "localhost" so it matches Vite's origin host.
   connectFirestoreEmulator(db, "localhost", 8080);
   connectFunctionsEmulator(fns, "127.0.0.1", 5001);
+  connectStorageEmulator(storage, "localhost", 9199);
 }

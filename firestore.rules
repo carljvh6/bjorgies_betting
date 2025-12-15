@@ -5,6 +5,13 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
     function isAdminSeeder() { return signedIn() && request.auth.uid == "o3Jt0ivnfbRZSoFKL8ty2Uk2b9v2"; }
+    function myGroup() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.group;
+    }
+    function isApproved() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.approved == true;
+    }
 
     match /profiles/{uid} {
       allow read: if isOwner(uid);
@@ -13,7 +20,8 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if isOwner(uid);
+      // Owner can always read their own user doc. Group members can read each other.
+      allow read: if isOwner(uid) || (isApproved() && resource.data.group != null && resource.data.group == myGroup());
       // Server-owned wallet + roles.
       allow write: if false;
     }
@@ -24,17 +32,17 @@ service cloud.firestore {
     }
 
     match /events/{id} {
-      allow read: if true;
+      allow read: if isApproved();
       allow write: if isAdminSeeder();
     }
 
     match /markets/{id} {
-      allow read: if true;
+      allow read: if isApproved();
       allow write: if isAdminSeeder();
     }
 
     match /bets/{id} {
-      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow read: if isApproved() && resource.data.uid == request.auth.uid;
       allow write: if false;
     }
   }
