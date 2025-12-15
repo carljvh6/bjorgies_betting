@@ -11,10 +11,12 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "seed:ufc324": "node scripts/seedUfc324.js"
   },
   "dependencies": {
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^4.7.0"
   }
 }
+

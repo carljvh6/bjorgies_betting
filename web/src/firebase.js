@@ -16,6 +16,10 @@ const firebaseConfig = {
 console.log("firebase projectId:", firebaseConfig.projectId);
 console.log("firebase authDomain:", firebaseConfig.authDomain);
 
+// Emulators are now opt-in so local dev can point at the real project by default.
+// Set `VITE_USE_EMULATORS=true` to use emulators.
+const useEmulators = String(import.meta.env.VITE_USE_EMULATORS || "").toLowerCase() === "true";
+
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
@@ -23,7 +27,7 @@ export const provider = new GoogleAuthProvider();
 export const db = getFirestore(app);
 export const fns = getFunctions(app);
 
-if (import.meta.env.DEV) {
+if (useEmulators) {
   // Use "localhost" so it matches Vite's origin host.
   connectFirestoreEmulator(db, "localhost", 8080);
   connectFunctionsEmulator(fns, "127.0.0.1", 5001);
