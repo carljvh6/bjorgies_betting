@@ -32,12 +32,14 @@ service cloud.firestore {
     }
 
     match /events/{id} {
-      allow read: if isApproved();
+      // Guests (signed-out) can browse events; signed-in users must be approved.
+      allow read: if !signedIn() || isApproved();
       allow write: if isAdminSeeder();
     }
 
     match /markets/{id} {
-      allow read: if isApproved();
+      // Guests (signed-out) can browse markets; signed-in users must be approved.
+      allow read: if !signedIn() || isApproved();
       allow write: if isAdminSeeder();
     }
 

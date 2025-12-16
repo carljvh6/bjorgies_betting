@@ -33,6 +33,9 @@ let headerAccountMetaEl = null;
 const eventsCache = new Map(); // eventId -> event data
 
 const STARTING_BALANCE = 1000;
+let isGuest = false;
+let guestBalance = STARTING_BALANCE;
+const guestPendingBets = []; // local-only; cleared on refresh
 
 const appEl = document.querySelector("#app");
 appEl.innerHTML = `
@@ -111,12 +114,18 @@ async function fetchProfile(uid) {
 function updateHeaderMeta() {
   if (!headerAccountMetaEl) return;
   if (currentBalance == null) return;
-  const existing = String(headerAccountMetaEl.textContent || "");
-  if (existing.includes("balance")) {
-    // Already set elsewhere; leave.
+  const existing = String(headerAccountMetaEl.textContent || "").trim();
+
+  if (isGuest) {
+    headerAccountMetaEl.textContent = `balance ${currentBalance} • not saved`;
     return;
   }
-  headerAccountMetaEl.textContent = `balance ${currentBalance}`;
+
+  // Only show balance if the header meta is empty or already showing balance.
+  // (Don't overwrite "X bets • ledger Δ Y".)
+  if (!existing || existing.startsWith("balance")) {
+    headerAccountMetaEl.textContent = `balance ${currentBalance}`;
+  }
 }
 
 function fmtTs(ts) {
@@ -175,25 +184,26 @@ function renderLoggedOut() {
   clearEventMarketsListener();
   clearProfileListeners();
   clearUserDocListener();
+  clearGroupLeaderboardListener();
   currentUser = null;
   currentProfile = null;
   currentView = "dashboard";
+  isGuest = false;
+  guestBalance = STARTING_BALANCE;
+  guestPendingBets.length = 0;
 
   authAreaEl.innerHTML = `
     <div style="display:flex; gap: 8px;">
       <button id="login">Login</button>
       <button id="signupStart">Sign up</button>
+      <button id="guestStart" style="opacity:0.9;">Enter as guest</button>
     </div>
   `;
 
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
       <h1 style="margin: 0 0 8px 0; font-size: 42px; line-height: 1.1;">Welcome to Bjorgies betting</h1>
-      <div style="opacity: 0.85; margin-bottom: 16px;">Sign in or sign up with Google to see the upcoming events.</div>
-      <div style="display:flex; gap: 12px; flex-wrap: wrap;">
-        <button id="login2">Login with Google</button>
-        <button id="signup2">Sign up with Google</button>
-      </div>
+      <div style="opacity: 0.85; margin-bottom: 0;">Use the Login / Sign up buttons in the top right to get started.</div>
     </section>
   `;
 
@@ -210,9 +220,43 @@ function renderLoggedOut() {
   };
 
   document.querySelector("#login").onclick = login;
-  document.querySelector("#login2").onclick = login;
   document.querySelector("#signupStart").onclick = login;
-  document.querySelector("#signup2").onclick = login;
+  document.querySelector("#guestStart").onclick = async () => {
+    // Ensure Firestore requests are truly unauthenticated in guest mode.
+    try {
+      await signOut(auth);
+    } catch {
+      // ignore
+    }
+    isGuest = true;
+    guestBalance = STARTING_BALANCE;
+    guestPendingBets.length = 0;
+    renderGuest();
+  };
+}
+
+function renderGuest() {
+  clearProfileListeners();
+  clearUserDocListener();
+  clearGroupLeaderboardListener();
+  currentUser = null;
+  currentProfile = null;
+  currentView = currentView || "dashboard";
+  isGuest = true;
+  currentBalance = guestBalance;
+
+  authAreaEl.innerHTML = `
+    <div style="text-align:right;">
+      <div style="font-weight: 650;">Guest</div>
+      <div id="accountMeta" style="opacity: 0.8; font-size: 12px;">balance ${guestBalance} • not saved</div>
+    </div>
+    <button id="exitGuest">Exit</button>
+  `;
+  headerAccountMetaEl = document.querySelector("#accountMeta");
+  document.querySelector("#exitGuest").onclick = () => renderLoggedOut();
+
+  // Guests can browse dashboard/event (reads are public when signed out).
+  setView(currentView || "dashboard", { uid: "guest" });
 }
 
 function renderSignup(user) {
@@ -936,9 +980,25 @@ function renderEvent(user, eventId) {
     try {
       btn.disabled = true;
       btn.textContent = "Placing…";
-      const placeBet = httpsCallable(fns, "placeBet");
-      const res = await placeBet({ marketId, option, stake });
-      betMsgEl.innerHTML = `<div style="color:#0a7a2f;">Bet placed (${res.data?.betId || "ok"}). Balance will update.</div>`;
+      if (isGuest) {
+        if (!Number.isInteger(guestBalance)) guestBalance = STARTING_BALANCE;
+        if (stake > guestBalance) throw new Error("Stake exceeds your balance.");
+        guestBalance -= stake;
+        currentBalance = guestBalance;
+        updateHeaderMeta();
+        eventBalanceValEl.textContent = String(guestBalance);
+        guestPendingBets.push({
+          marketId,
+          option,
+          stake,
+          createdAt: new Date().toISOString(),
+        });
+        betMsgEl.innerHTML = `<div style="color:#0a7a2f;">Guest bet placed (not saved). Balance updated locally.</div>`;
+      } else {
+        const placeBet = httpsCallable(fns, "placeBet");
+        const res = await placeBet({ marketId, option, stake });
+        betMsgEl.innerHTML = `<div style="color:#0a7a2f;">Bet placed (${res.data?.betId || "ok"}). Balance will update.</div>`;
+      }
     } catch (err) {
       console.error(err);
       betMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
@@ -1087,7 +1147,10 @@ function renderAwaitingApproval(user, profile) {
 }
 
 onAuthStateChanged(auth, async (user) => {
-  if (!user) return renderLoggedOut();
+  if (!user) {
+    if (isGuest) return renderGuest();
+    return renderLoggedOut();
+  }
 
   currentUser = user;
   currentProfile = null;
