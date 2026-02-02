@@ -44,8 +44,28 @@ service cloud.firestore {
     }
 
     match /bets/{id} {
-      allow read: if isApproved() && resource.data.uid == request.auth.uid;
+      // Owner can read own bets; group members can read each other's bets (e.g. Previous Results).
+      allow read: if isApproved() && (
+        resource.data.uid == request.auth.uid ||
+        (resource.data.uid != null && exists(/databases/$(database)/documents/users/$(resource.data.uid)) &&
+          get(/databases/$(database)/documents/users/$(resource.data.uid)).data.group == myGroup())
+      );
       allow write: if false;
+    }
+
+    match /suggestions/{id} {
+      // Suggestions are visible to the suggester's group (even before approval).
+      allow read: if isApproved() && resource.data.group != null && resource.data.group == myGroup();
+
+      // Approved users can create suggestions only for their own group.
+      allow create: if isApproved()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.group != null
+        && request.resource.data.group == myGroup()
+        && request.resource.data.status == "pending";
+
+      // Suggestions can only be approved/rejected by server/admin code (Cloud Functions).
+      allow update, delete: if false;
     }
   }
 }

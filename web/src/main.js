@@ -2,6 +2,7 @@ import "./style.css";
 import { db, auth, provider, fns } from "./firebase";
 import { signInWithPopup, signOut, onAuthStateChanged, updateProfile } from "firebase/auth";
 import {
+  addDoc,
   collection,
   doc,
   getDoc,
@@ -15,6 +16,9 @@ import {
   where,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import { registerSW } from "virtual:pwa-register";
+
+registerSW({ immediate: true });
 
 
 let currentUser = null;
@@ -26,11 +30,24 @@ let unsubscribeAccount = null;
 let unsubscribePendingBets = null;
 let unsubscribeUserDoc = null;
 let unsubscribeGroupLeaderboard = null;
+let unsubscribeSuggestions = null;
 let groupLeaderboardGroup = null;
 let currentBalance = null;
 let currentGroup = null;
 let headerAccountMetaEl = null;
 const eventsCache = new Map(); // eventId -> event data
+let eventsSportFilter = (() => {
+  try {
+    const raw = String(localStorage.getItem("eventsSportFilter") || "").toLowerCase();
+    if (raw === "rugby") return "rugby";
+    if (raw === "soccer") return "soccer";
+    if (raw === "boxing") return "boxing";
+    if (raw === "cricket") return "cricket";
+    return "mma";
+  } catch {
+    return "mma";
+  }
+})();
 
 const STARTING_BALANCE = 1000;
 let isGuest = false;
@@ -51,6 +68,10 @@ appEl.innerHTML = `
           alt="Bjorgies betting"
           style="width: 88px; height: 88px; border-radius: 14px; object-fit: cover;"
         />
+        <div style="display:flex; align-items:center; gap: 8px;">
+          <button id="leaderboardTab" style="display:none;">Leaderboard</button>
+          <button id="previousResultsTab" style="display:none;">Previous Results</button>
+        </div>
         <div id="authArea" style="display:flex; align-items:center; gap: 12px;"></div>
       </div>
     </header>
@@ -61,6 +82,284 @@ appEl.innerHTML = `
 
 const authAreaEl = document.querySelector("#authArea");
 const mainEl = document.querySelector("#main");
+const leaderboardTabEl = document.querySelector("#leaderboardTab");
+const previousResultsTabEl = document.querySelector("#previousResultsTab");
+
+function setLeaderboardTabVisible(visible) {
+  if (!leaderboardTabEl) return;
+  leaderboardTabEl.style.display = visible ? "inline-flex" : "none";
+  leaderboardTabEl.style.alignItems = "center";
+  leaderboardTabEl.style.gap = "8px";
+  leaderboardTabEl.style.whiteSpace = "nowrap";
+}
+
+function setPreviousResultsTabVisible(visible) {
+  if (!previousResultsTabEl) return;
+  previousResultsTabEl.style.display = visible ? "inline-flex" : "none";
+}
+
+if (leaderboardTabEl) {
+  leaderboardTabEl.onclick = () => {
+    if (!currentUser || isGuest) return;
+    setView("leaderboard", currentUser);
+  };
+}
+if (previousResultsTabEl) {
+  previousResultsTabEl.onclick = () => {
+    if (!currentUser || isGuest) return;
+    setView("previousResults", currentUser);
+  };
+}
+
+function renderSuggest(user) {
+  clearUpcomingEventsListener();
+  clearEventMarketsListener();
+  clearProfileListeners();
+  clearGroupLeaderboardListener();
+  clearSuggestionsListener();
+
+  if (!currentGroup) {
+    mainEl.innerHTML = `
+      <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+        <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap; align-items:flex-end;">
+          <div>
+            <div style="font-size: 18px; font-weight: 750;">Suggest a bet</div>
+            <div style="opacity: 0.8; margin-top: 4px; font-size: 12px;">You need to be in a group to suggest bets.</div>
+          </div>
+          <div style="display:flex; gap: 10px;">
+            <button id="backToEvents">Back to events</button>
+            <button id="goToProfile" style="opacity:0.9;">Profile</button>
+          </div>
+        </div>
+        <div style="margin-top: 12px; opacity: 0.85;">Set your group in Profile first.</div>
+      </section>
+    `;
+    document.querySelector("#backToEvents").onclick = () => setView("dashboard", user);
+    document.querySelector("#goToProfile").onclick = () => setView("profile", user);
+    return;
+  }
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap; align-items:flex-end;">
+        <div>
+          <div style="font-size: 18px; font-weight: 750;">Suggest a bet</div>
+          <div style="opacity: 0.8; margin-top: 4px; font-size: 12px;">Visible to your group immediately; admin approval creates the actual event + markets.</div>
+        </div>
+        <div style="display:flex; gap: 10px;">
+          <button id="backToEvents">Back to events</button>
+          <button id="goToProfile" style="opacity:0.9;">Profile</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 14px; padding: 12px; border: 1px solid rgba(127,127,127,0.18); border-radius: 12px;">
+        <div style="font-weight: 750;">New suggestion</div>
+        <form id="suggestForm" style="margin-top: 12px; display:flex; flex-direction:column; gap: 12px;">
+          <div style="display:flex; gap: 10px; flex-wrap: wrap;">
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">Sport</span>
+              <select id="sugSport" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 220px;">
+                <option value="mma">MMA</option>
+                <option value="rugby">Rugby</option>
+                <option value="soccer">Soccer</option>
+                <option value="boxing">Boxing</option>
+                <option value="cricket">Cricket</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">League / competition (optional)</span>
+              <input id="sugLeague" type="text" maxlength="40" placeholder="e.g. UFC / Rugby Championship / EPL" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 300px;" />
+            </label>
+          </div>
+
+          <div style="display:flex; gap: 10px; flex-wrap: wrap;">
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">Participant A / Home</span>
+              <input id="sugA" type="text" maxlength="60" placeholder="e.g. South Africa" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 300px;" required />
+            </label>
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">Participant B / Away</span>
+              <input id="sugB" type="text" maxlength="60" placeholder="e.g. New Zealand" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 300px;" required />
+            </label>
+          </div>
+
+          <div style="display:flex; gap: 10px; flex-wrap: wrap; align-items:flex-end;">
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">Start date/time</span>
+              <input id="sugStart" type="datetime-local" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 240px;" required />
+            </label>
+            <label style="display:flex; flex-direction:column; gap: 6px;">
+              <span style="opacity: 0.85; font-size: 12px;">Venue/location (optional)</span>
+              <input id="sugVenue" type="text" maxlength="80" placeholder="e.g. Cape Town" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 360px;" />
+            </label>
+          </div>
+
+          <label style="display:flex; flex-direction:column; gap: 6px;">
+            <span style="opacity: 0.85; font-size: 12px;">Notes (optional)</span>
+            <input id="sugNotes" type="text" maxlength="140" placeholder="Anything else (e.g. title fight, special rules)" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);" />
+          </label>
+
+          <div style="display:flex; gap: 10px; align-items:center; flex-wrap: wrap;">
+            <button id="submitSuggestion" type="submit">Submit suggestion</button>
+            <div id="suggestMsg" style="opacity: 0.9;"></div>
+          </div>
+        </form>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+          <div style="font-size: 16px; font-weight: 750;">Suggestions for group: ${currentGroup}</div>
+          <div id="suggestionsStatus" style="opacity: 0.8;"></div>
+        </div>
+        <div id="suggestionsList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 10px;"></div>
+      </div>
+    </section>
+  `;
+
+  document.querySelector("#backToEvents").onclick = () => setView("dashboard", user);
+  document.querySelector("#goToProfile").onclick = () => setView("profile", user);
+
+  const formEl = document.querySelector("#suggestForm");
+  const msgEl = document.querySelector("#suggestMsg");
+  const statusEl = document.querySelector("#suggestionsStatus");
+  const listEl = document.querySelector("#suggestionsList");
+  const submitBtn = document.querySelector("#submitSuggestion");
+
+  formEl.onsubmit = async (e) => {
+    e.preventDefault();
+    msgEl.textContent = "";
+
+    const sport = String(document.querySelector("#sugSport")?.value || "").trim().toLowerCase();
+    const league = String(document.querySelector("#sugLeague")?.value || "").trim();
+    const a = String(document.querySelector("#sugA")?.value || "").trim();
+    const b = String(document.querySelector("#sugB")?.value || "").trim();
+    const venue = String(document.querySelector("#sugVenue")?.value || "").trim();
+    const notes = String(document.querySelector("#sugNotes")?.value || "").trim();
+    const startRaw = String(document.querySelector("#sugStart")?.value || "").trim();
+
+    if (!a || !b) {
+      msgEl.innerHTML = `<div style="color:#b00020;">Participants are required.</div>`;
+      return;
+    }
+    if (!startRaw) {
+      msgEl.innerHTML = `<div style="color:#b00020;">Start date/time is required.</div>`;
+      return;
+    }
+    const startDate = new Date(startRaw);
+    if (Number.isNaN(startDate.getTime())) {
+      msgEl.innerHTML = `<div style="color:#b00020;">Invalid start date/time.</div>`;
+      return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Submitting…";
+    try {
+      await addDoc(collection(db, "suggestions"), {
+        uid: user.uid,
+        group: currentGroup,
+        sport: sport || "other",
+        league: league || null,
+        participantA: a,
+        participantB: b,
+        homeTeam: a,
+        awayTeam: b,
+        venue: venue || null,
+        notes: notes || null,
+        startTime: Timestamp.fromDate(startDate),
+        status: "pending",
+        createdAt: serverTimestamp(),
+      });
+      msgEl.innerHTML = `<div style="color:#0a7a2f;">Suggestion submitted.</div>`;
+      formEl.reset();
+    } catch (err) {
+      console.error(err);
+      msgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Submit suggestion";
+    }
+  };
+
+  statusEl.textContent = "Loading…";
+  listEl.innerHTML = "";
+
+  const q = query(collection(db, "suggestions"), where("group", "==", currentGroup));
+  unsubscribeSuggestions = onSnapshot(
+    q,
+    (snap) => {
+      const rows = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() || {}) }))
+        .sort((a, b) => {
+          const at = a.createdAt?.toDate?.()?.getTime?.() ?? 0;
+          const bt = b.createdAt?.toDate?.()?.getTime?.() ?? 0;
+          return bt - at;
+        });
+
+      statusEl.textContent = `${rows.length} suggestion${rows.length === 1 ? "" : "s"}`;
+      if (rows.length === 0) {
+        listEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">No suggestions yet.</div>`;
+        return;
+      }
+
+      const html = rows.map((s) => {
+        const sport = String(s.sport || "").toUpperCase() || "OTHER";
+        const title = `${String(s.participantA || "")} vs ${String(s.participantB || "")}`.trim() || s.id;
+        const when = fmtTs(s.startTime);
+        const status = String(s.status || "pending");
+        const venue = String(s.venue || "");
+        const notes = String(s.notes || "");
+        const canApprove = !isGuest && (s.status === "pending") && (String(currentUser?.uid || "") !== "") ; // admin check is server-side
+
+        return `
+          <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+            <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+              <div style="font-weight: 850;">${title}</div>
+              <div style="opacity: 0.8;">${when}</div>
+            </div>
+            <div style="opacity: 0.85; margin-top: 6px;">
+              <span>${sport}</span>
+              <span> • </span>
+              <span>Status: <strong>${status}</strong></span>
+              ${venue ? `<span> • </span><span>${venue}</span>` : ""}
+              ${notes ? `<span> • </span><span>${notes}</span>` : ""}
+            </div>
+            ${canApprove ? `<div style="margin-top: 10px;"><button data-approve-suggestion="1" data-suggestion-id="${s.id}">Approve (admin)</button></div>` : ""}
+          </article>
+        `;
+      });
+
+      listEl.innerHTML = html.join("");
+    },
+    (err) => {
+      console.error(err);
+      statusEl.textContent = "Failed to load";
+      listEl.innerHTML = `<div style="margin-top: 12px; color: #b00020;">${err?.code || "error"}: ${
+        err?.message || String(err)
+      }</div>`;
+    }
+  );
+
+  listEl.onclick = async (e) => {
+    const btn = e.target?.closest?.("[data-approve-suggestion]");
+    if (!btn) return;
+    const suggestionId = btn.getAttribute("data-suggestion-id");
+    if (!suggestionId) return;
+    btn.disabled = true;
+    btn.textContent = "Approving…";
+    try {
+      const approveSuggestion = httpsCallable(fns, "approveSuggestion");
+      await approveSuggestion({ suggestionId });
+    } catch (err) {
+      console.error(err);
+      msgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Approve (admin)";
+    }
+  };
+}
+
 
 function clearUpcomingEventsListener() {
   if (typeof unsubscribeUpcomingEvents === "function") {
@@ -102,6 +401,83 @@ function clearGroupLeaderboardListener() {
   }
   unsubscribeGroupLeaderboard = null;
   groupLeaderboardGroup = null;
+}
+
+function clearSuggestionsListener() {
+  if (typeof unsubscribeSuggestions === "function") unsubscribeSuggestions();
+  unsubscribeSuggestions = null;
+}
+
+function startGroupLeaderboard(group, { hintEl, statusEl, listEl, msgEl } = {}) {
+  if (msgEl) msgEl.innerHTML = "";
+  const g = typeof group === "string" && group.trim() ? group.trim() : "";
+
+  if (!g) {
+    if (hintEl) hintEl.textContent = "Set a group to see your group leaderboard.";
+    if (statusEl) statusEl.textContent = "";
+    if (listEl) listEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">Set a group to see your leaderboard.</div>`;
+    clearGroupLeaderboardListener();
+    return;
+  }
+
+  if (hintEl) hintEl.textContent = `Group: ${g}`;
+
+  // Avoid restarting the same subscription.
+  if (groupLeaderboardGroup === g && typeof unsubscribeGroupLeaderboard === "function") return;
+
+  clearGroupLeaderboardListener();
+  groupLeaderboardGroup = g;
+  if (statusEl) statusEl.textContent = "Loading…";
+  if (listEl) listEl.innerHTML = "";
+
+  const q = query(collection(db, "users"), where("group", "==", g));
+  unsubscribeGroupLeaderboard = onSnapshot(
+    q,
+    (snap) => {
+      const rows = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => {
+          const ap = (a.balance ?? 0) - STARTING_BALANCE;
+          const bp = (b.balance ?? 0) - STARTING_BALANCE;
+          // Higher profit first
+          return bp - ap;
+        });
+
+      if (statusEl) statusEl.textContent = `${rows.length} member${rows.length === 1 ? "" : "s"}`;
+      if (!listEl) return;
+      if (rows.length === 0) {
+        listEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">No one is in this group yet.</div>`;
+        return;
+      }
+
+      const html = rows.map((u, idx) => {
+        const uid = String(u.id || "");
+        const name = String(u.displayName || u.email || uid).trim() || uid;
+        const balance = Number.isFinite(Number(u.balance)) ? Number(u.balance) : 0;
+        const profit = balance - STARTING_BALANCE;
+        const isMe = currentUser?.uid && uid === currentUser.uid;
+        return `
+          <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.18); border-radius: 12px;">
+            <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+              <div style="font-weight: 750;">#${idx + 1} ${name}${isMe ? " (you)" : ""}</div>
+              <div style="opacity:0.9;">Profit: <strong>${profit}</strong> • Balance: ${balance}</div>
+            </div>
+          </article>
+        `;
+      });
+
+      listEl.innerHTML = html.join("");
+    },
+    (err) => {
+      console.error(err);
+      if (statusEl) statusEl.textContent = "Failed to load";
+      if (listEl) {
+        listEl.innerHTML = `<div style="color:#b00020; padding: 12px 0;">${err?.code || "error"}: ${
+          err?.message || String(err)
+        }</div>`;
+      }
+    }
+  );
 }
 
 async function fetchProfile(uid) {
@@ -166,9 +542,38 @@ function setView(nextView, user, payload = {}) {
     return;
   }
 
+  if (nextView === "leaderboard") {
+    clearUpcomingEventsListener();
+    clearEventMarketsListener();
+    clearProfileListeners();
+    clearSuggestionsListener();
+    renderLeaderboard(user);
+    return;
+  }
+
+  if (nextView === "previousResults") {
+    clearUpcomingEventsListener();
+    clearEventMarketsListener();
+    clearProfileListeners();
+    clearGroupLeaderboardListener();
+    clearSuggestionsListener();
+    renderPreviousResults(user);
+    return;
+  }
+
+  if (nextView === "suggest") {
+    clearUpcomingEventsListener();
+    clearEventMarketsListener();
+    clearProfileListeners();
+    clearGroupLeaderboardListener();
+    renderSuggest(user);
+    return;
+  }
+
   if (nextView === "event") {
     clearUpcomingEventsListener();
     clearProfileListeners();
+    clearSuggestionsListener();
     renderEvent(user, payload.eventId);
     return;
   }
@@ -176,6 +581,8 @@ function setView(nextView, user, payload = {}) {
   // default
   clearProfileListeners();
   clearEventMarketsListener();
+  clearGroupLeaderboardListener();
+  clearSuggestionsListener();
   renderDashboard(user);
 }
 
@@ -199,6 +606,8 @@ function renderLoggedOut() {
       <button id="guestStart" style="opacity:0.9;">Enter as guest</button>
     </div>
   `;
+  setLeaderboardTabVisible(false);
+  setPreviousResultsTabVisible(false);
 
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
@@ -254,6 +663,8 @@ function renderGuest() {
   `;
   headerAccountMetaEl = document.querySelector("#accountMeta");
   document.querySelector("#exitGuest").onclick = () => renderLoggedOut();
+  setLeaderboardTabVisible(false);
+  setPreviousResultsTabVisible(false);
 
   // Guests can browse dashboard/event (reads are public when signed out).
   setView(currentView || "dashboard", { uid: "guest" });
@@ -280,6 +691,8 @@ function renderSignup(user) {
   document.querySelector("#logout").onclick = async () => {
     await signOut(auth);
   };
+  setLeaderboardTabVisible(false);
+  setPreviousResultsTabVisible(false);
 
   const defaultDisplayName = user.displayName || "";
   const defaultPhoto = user.photoURL || "";
@@ -296,8 +709,12 @@ function renderSignup(user) {
 
         <label style="display:flex; flex-direction:column; gap: 6px;">
           <span style="font-weight: 600;">Group</span>
-          <input id="signupGroup" type="text" maxlength="32" placeholder="e.g. boys_trip_2025" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);" />
-          <div style="opacity:0.75; font-size: 12px;">Optional. People with the same group can see a shared leaderboard.</div>
+          <select id="signupGroupSelect" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);">
+            <option value="og_bjorgies" selected>og_bjorgies</option>
+            <option value="other">Other</option>
+          </select>
+          <input id="signupGroupOther" type="text" maxlength="32" placeholder="Enter group name" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); display:none;" />
+          <div style="opacity:0.75; font-size: 12px;">People with the same group can see a shared leaderboard.</div>
         </label>
 
         <div id="signupMsg"></div>
@@ -308,7 +725,8 @@ function renderSignup(user) {
   `;
 
   const displayNameInput = document.querySelector("#signupDisplayName");
-  const groupInput = document.querySelector("#signupGroup");
+  const groupSelect = document.querySelector("#signupGroupSelect");
+  const groupOtherInput = document.querySelector("#signupGroupOther");
   const previewImg = null;
   const previewPlaceholder = null;
   const signupForm = document.querySelector("#signupForm");
@@ -318,13 +736,31 @@ function renderSignup(user) {
 
   const showPreview = () => {};
 
+  const updateSignupGroupUi = () => {
+    const sel = String(groupSelect?.value || "og_bjorgies");
+    if (!groupOtherInput) return;
+    if (sel === "other") {
+      groupOtherInput.style.display = "block";
+    } else {
+      groupOtherInput.style.display = "none";
+      groupOtherInput.value = "";
+    }
+  };
+  updateSignupGroupUi();
+  if (groupSelect) groupSelect.onchange = updateSignupGroupUi;
+
   signupForm.onsubmit = async (e) => {
     e.preventDefault();
     signupMsgEl.innerHTML = "";
     const displayName = displayNameInput.value.trim();
-    const group = String(groupInput?.value || "").trim();
+    const sel = String(groupSelect?.value || "og_bjorgies");
+    const group = sel === "other" ? String(groupOtherInput?.value || "").trim() : "og_bjorgies";
     if (!displayName) {
       signupMsgEl.innerHTML = `<div style="color:#b00020;">Display name is required.</div>`;
+      return;
+    }
+    if (sel === "other" && !group) {
+      signupMsgEl.innerHTML = `<div style="color:#b00020;">Enter a group name (or pick og_bjorgies).</div>`;
       return;
     }
 
@@ -355,10 +791,9 @@ function renderSignup(user) {
       const ensureUserFn = httpsCallable(fns, "ensureUser");
       await ensureUserFn();
 
-      if (group) {
-        const setGroup = httpsCallable(fns, "setGroup");
-        await setGroup({ group });
-      }
+      // Always set a group on signup (default is og_bjorgies).
+      const setGroup = httpsCallable(fns, "setGroup");
+      await setGroup({ group });
 
       currentProfile = {
         displayName,
@@ -385,6 +820,11 @@ function renderDashboard(user) {
   clearUpcomingEventsListener();
   clearEventMarketsListener();
 
+  const isMma = eventsSportFilter === "mma";
+  const isRugby = eventsSportFilter === "rugby";
+  const isSoccer = eventsSportFilter === "soccer";
+  const isBoxing = eventsSportFilter === "boxing";
+  const isCricket = eventsSportFilter === "cricket";
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
       <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
@@ -392,7 +832,17 @@ function renderDashboard(user) {
           <div style="font-size: 18px; font-weight: 750;">Upcoming events</div>
           <div style="opacity: 0.8; margin-top: 4px;">All events that haven’t occurred yet.</div>
         </div>
-        <div id="eventsStatus" style="opacity: 0.8;"></div>
+        <div style="display:flex; align-items:center; gap: 12px; flex-wrap: wrap; justify-content:flex-end;">
+          ${!isGuest && currentUser?.uid && currentGroup ? `<button id="suggestBtn" style="opacity:0.95;">Suggest</button>` : ""}
+          <div style="display:flex; gap: 8px; padding: 4px; border: 1px solid rgba(127,127,127,0.18); border-radius: 999px;">
+            <button id="sportTabMma" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isMma ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">MMA</button>
+            <button id="sportTabRugby" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isRugby ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Rugby</button>
+            <button id="sportTabSoccer" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isSoccer ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Soccer</button>
+            <button id="sportTabBoxing" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isBoxing ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Boxing</button>
+            <button id="sportTabCricket" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isCricket ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Cricket</button>
+          </div>
+          <div id="eventsStatus" style="opacity: 0.8;"></div>
+        </div>
       </div>
       <div id="eventsList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 12px;"></div>
     </section>
@@ -400,6 +850,42 @@ function renderDashboard(user) {
 
   const eventsStatusEl = document.querySelector("#eventsStatus");
   const eventsListEl = document.querySelector("#eventsList");
+  const sportTabMmaEl = document.querySelector("#sportTabMma");
+  const sportTabRugbyEl = document.querySelector("#sportTabRugby");
+  const sportTabSoccerEl = document.querySelector("#sportTabSoccer");
+  const sportTabBoxingEl = document.querySelector("#sportTabBoxing");
+  const sportTabCricketEl = document.querySelector("#sportTabCricket");
+  const suggestBtnEl = document.querySelector("#suggestBtn");
+
+  if (suggestBtnEl) {
+    suggestBtnEl.onclick = () => setView("suggest", user);
+  }
+
+  sportTabMmaEl.onclick = () => {
+    eventsSportFilter = "mma";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
+  sportTabRugbyEl.onclick = () => {
+    eventsSportFilter = "rugby";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
+  sportTabSoccerEl.onclick = () => {
+    eventsSportFilter = "soccer";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
+  sportTabBoxingEl.onclick = () => {
+    eventsSportFilter = "boxing";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
+  sportTabCricketEl.onclick = () => {
+    eventsSportFilter = "cricket";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
 
   eventsStatusEl.textContent = "Loading…";
 
@@ -412,7 +898,8 @@ function renderDashboard(user) {
   unsubscribeUpcomingEvents = onSnapshot(
     upcomingQ,
     (snap) => {
-      eventsStatusEl.textContent = `${snap.size} event${snap.size === 1 ? "" : "s"}`;
+      // In this app, each Firestore `events` doc is a single fight.
+      // Organize upcoming fights into card boxes (UFC 3xx / Fight Night, etc.).
       eventsCache.clear();
 
       if (snap.empty) {
@@ -420,19 +907,99 @@ function renderDashboard(user) {
         return;
       }
 
-      const rows = snap.docs.map((d) => {
+      const byCard = new Map(); // key -> { cardName, cardId, venue, league, status, startTime, fights: [] }
+      let includedCount = 0;
+      for (const d of snap.docs) {
         const ev = d.data() || {};
         eventsCache.set(d.id, ev);
-        const title = ev.name || d.id;
+
+        const sport = String(ev.sport || "").toLowerCase();
+        if (eventsSportFilter && sport && sport !== eventsSportFilter) continue;
+        // If sport is missing, treat it as MMA to keep legacy docs visible under MMA.
+        if ((eventsSportFilter === "rugby" || eventsSportFilter === "soccer" || eventsSportFilter === "boxing" || eventsSportFilter === "cricket") && !sport) continue;
+
+        includedCount += 1;
+
+        const cardId = ev.cardId || "";
+        const cardName = ev.cardName || cardId || ev.league || "Card";
+        const key = `${cardId || cardName}`;
+
         const league = ev.league || ev.sport || "";
-        const status = ev.status || "";
-        const when = fmtTs(ev.startTime);
         const venue = ev.venue || "";
+        const status = ev.status || "";
+        const startTime = ev.startTime || null;
+
+        if (!byCard.has(key)) {
+          byCard.set(key, {
+            cardId,
+            cardName,
+            league,
+            venue,
+            status,
+            startTime,
+            fights: [],
+          });
+        }
+
+        const grp = byCard.get(key);
+        // Use earliest startTime for the card header.
+        try {
+          const cur = grp.startTime?.toDate?.()?.getTime?.() ?? null;
+          const next = startTime?.toDate?.()?.getTime?.() ?? null;
+          if (cur == null || (next != null && next < cur)) grp.startTime = startTime;
+        } catch {
+          // ignore
+        }
+
+        grp.fights.push({
+          eventId: d.id,
+          name: ev.name || d.id,
+          boutType: ev.boutType || "",
+          startTime,
+        });
+      }
+
+      const groups = Array.from(byCard.values()).sort((a, b) => {
+        const at = a.startTime?.toDate?.()?.getTime?.() ?? 0;
+        const bt = b.startTime?.toDate?.()?.getTime?.() ?? 0;
+        return at - bt;
+      });
+
+      // Show cards count + fights count.
+      eventsStatusEl.textContent = `${groups.length} card${groups.length === 1 ? "" : "s"} • ${includedCount} event${includedCount === 1 ? "" : "s"}`;
+
+      const rows = groups.map((g) => {
+        const when = fmtTs(g.startTime);
+        const league = g.league || "";
+        const status = g.status || "";
+        const venue = g.venue || "";
+
+        const fightsHtml = g.fights
+          .slice()
+          .sort((a, b) => {
+            const at = a.startTime?.toDate?.()?.getTime?.() ?? 0;
+            const bt = b.startTime?.toDate?.()?.getTime?.() ?? 0;
+            return at - bt;
+          })
+          .map((f) => {
+            const sub = [f.boutType].filter(Boolean).join(" • ");
+            const whenStr = fmtTs(f.startTime);
+            return `
+              <div data-event-id="${f.eventId}" style="padding: 10px; border: 1px solid rgba(127,127,127,0.18); border-radius: 10px; cursor: pointer; background: rgba(127,127,127,0.06); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-weight: 750;">${f.name}</div>
+                  ${sub ? `<div style="opacity: 0.8; font-size: 12px; margin-top: 2px;">${sub}</div>` : ""}
+                </div>
+                <div style="opacity: 0.85; font-size: 12px; white-space: nowrap;">${whenStr}</div>
+              </div>
+            `;
+          })
+          .join("");
 
         return `
-          <article data-event-id="${d.id}" style="padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; cursor: pointer;">
+          <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
             <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
-              <div style="font-weight: 750;">${title}</div>
+              <div style="font-weight: 850;">${g.cardName || g.cardId || "Card"}</div>
               <div style="opacity: 0.8;">${when}</div>
             </div>
             <div style="opacity: 0.85; margin-top: 6px;">
@@ -441,6 +1008,11 @@ function renderDashboard(user) {
               ${status ? `<span>${status}</span>` : ""}
               ${(league || status) && venue ? `<span> • </span>` : ""}
               ${venue ? `<span>${venue}</span>` : ""}
+              ${(league || status || venue) ? `<span> • </span>` : ""}
+              <span>${g.fights.length} fight${g.fights.length === 1 ? "" : "s"}</span>
+            </div>
+            <div style="margin-top: 10px; display:flex; flex-direction:column; gap: 8px;">
+              ${fightsHtml}
             </div>
           </article>
         `;
@@ -513,7 +1085,11 @@ function renderProfile(user) {
           </div>
         </div>
         <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap: wrap; align-items:center;">
-          <input id="groupInput" type="text" maxlength="32" placeholder="e.g. boys_trip_2025" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 260px;" />
+          <select id="groupSelect" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25);">
+            <option value="og_bjorgies">og_bjorgies</option>
+            <option value="other">Other</option>
+          </select>
+          <input id="groupOther" type="text" maxlength="32" placeholder="Enter group name" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 260px; display:none;" />
           <button id="saveGroup">Save group</button>
           <button id="clearGroup" style="opacity:0.9;">Clear</button>
         </div>
@@ -554,7 +1130,8 @@ function renderProfile(user) {
 
   const balanceValEl = document.querySelector("#balanceVal");
   const groupHintEl = document.querySelector("#groupHint");
-  const groupInputEl = document.querySelector("#groupInput");
+  const groupSelectEl = document.querySelector("#groupSelect");
+  const groupOtherEl = document.querySelector("#groupOther");
   const groupMsgEl = document.querySelector("#groupMsg");
   const groupLbStatusEl = document.querySelector("#groupLbStatus");
   const groupLbListEl = document.querySelector("#groupLbList");
@@ -563,6 +1140,37 @@ function renderProfile(user) {
   const adminPanelEl = document.querySelector("#adminPanel");
   const pendingApprovalsStatusEl = document.querySelector("#pendingApprovalsStatus");
   const pendingApprovalsListEl = document.querySelector("#pendingApprovalsList");
+
+  const setGroupControls = (group) => {
+    const g = String(group || "").trim();
+    if (!groupSelectEl || !groupOtherEl) return;
+
+    if (!g || g === "og_bjorgies") {
+      groupSelectEl.value = "og_bjorgies";
+      groupOtherEl.style.display = "none";
+      groupOtherEl.value = "";
+      return;
+    }
+
+    groupSelectEl.value = "other";
+    groupOtherEl.style.display = "block";
+    groupOtherEl.value = g;
+  };
+
+  const onGroupSelectChange = () => {
+    const sel = String(groupSelectEl?.value || "og_bjorgies");
+    if (!groupOtherEl) return;
+    if (sel === "other") {
+      groupOtherEl.style.display = "block";
+      groupOtherEl.focus();
+    } else {
+      groupOtherEl.style.display = "none";
+      groupOtherEl.value = "";
+    }
+  };
+  if (groupSelectEl) groupSelectEl.onchange = onGroupSelectChange;
+  // default UI state
+  setGroupControls(currentGroup);
 
   pendingStatusEl.textContent = "Loading…";
   groupLbStatusEl.textContent = "";
@@ -629,72 +1237,13 @@ function renderProfile(user) {
     }
   };
 
-  const startGroupLeaderboard = (group) => {
-    groupMsgEl.innerHTML = "";
-    if (!group) {
-      clearGroupLeaderboardListener();
-      groupHintEl.textContent = "Set a group to see your group leaderboard.";
-      groupLbStatusEl.textContent = "";
-      groupLbListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">Set a group to see your leaderboard.</div>`;
-      return;
-    }
-
-    groupHintEl.textContent = `Group: ${group}`;
-    if (groupLeaderboardGroup === group && typeof unsubscribeGroupLeaderboard === "function") {
-      return;
-    }
-
-    clearGroupLeaderboardListener();
-    groupLeaderboardGroup = group;
-    groupLbStatusEl.textContent = "Loading…";
-    groupLbListEl.innerHTML = "";
-
-    const q = query(collection(db, "users"), where("group", "==", group));
-    unsubscribeGroupLeaderboard = onSnapshot(
-      q,
-      (snap) => {
-        const rows = snap.docs.map((d) => ({ uid: d.id, ...(d.data() || {}) }));
-        rows.sort((a, b) => Number(b.balance || 0) - Number(a.balance || 0));
-
-        groupLbStatusEl.textContent = `${rows.length} member${rows.length === 1 ? "" : "s"}`;
-
-        if (rows.length === 0) {
-          groupLbListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">No one is in this group yet.</div>`;
-          return;
-        }
-
-        const html = rows.map((u, idx) => {
-          const bal = Number(u.balance);
-          const balance = Number.isFinite(bal) ? bal : 0;
-          const profit = balance - STARTING_BALANCE;
-          const name =
-            String(u.displayName || "").trim() ||
-            String(u.email || "").trim() ||
-            `${String(u.uid || "").slice(0, 6)}…`;
-          const isMe = u.uid === user.uid;
-          return `
-            <article style="padding: 10px 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; ${
-              isMe ? "background: rgba(70, 130, 180, 0.10);" : ""
-            }">
-              <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
-                <div style="font-weight: 750;">#${idx + 1} ${name}${isMe ? " (you)" : ""}</div>
-                <div style="opacity:0.9;">Profit: <strong>${profit}</strong> • Balance: ${balance}</div>
-              </div>
-            </article>
-          `;
-        });
-
-        groupLbListEl.innerHTML = html.join("");
-      },
-      (err) => {
-        console.error(err);
-        groupLbStatusEl.textContent = "Failed to load";
-        groupLbListEl.innerHTML = `<div style="color:#b00020; padding: 12px 0;">${err?.code || "error"}: ${
-          err?.message || String(err)
-        }</div>`;
-      }
-    );
-  };
+  const startGroupLeaderboardHere = (group) =>
+    startGroupLeaderboard(group, {
+      hintEl: groupHintEl,
+      statusEl: groupLbStatusEl,
+      listEl: groupLbListEl,
+      msgEl: groupMsgEl,
+    });
 
   unsubscribeAccount = onSnapshot(
     doc(db, "users", user.uid),
@@ -705,8 +1254,8 @@ function renderProfile(user) {
 
       const g = snap.data()?.group;
       currentGroup = typeof g === "string" && g ? g : null;
-      if (groupInputEl) groupInputEl.value = currentGroup || "";
-      startGroupLeaderboard(currentGroup);
+      setGroupControls(currentGroup);
+      startGroupLeaderboardHere(currentGroup);
 
       const role = String(snap.data()?.role || "user");
       if (role === "admin") {
@@ -726,7 +1275,12 @@ function renderProfile(user) {
 
   document.querySelector("#saveGroup").onclick = async () => {
     groupMsgEl.innerHTML = "";
-    const group = String(groupInputEl?.value || "").trim();
+    const sel = String(groupSelectEl?.value || "og_bjorgies");
+    const group = sel === "other" ? String(groupOtherEl?.value || "").trim() : "og_bjorgies";
+    if (sel === "other" && !group) {
+      groupMsgEl.innerHTML = `<div style="color:#b00020;">Enter a group name (or choose og_bjorgies).</div>`;
+      return;
+    }
     try {
       const setGroup = httpsCallable(fns, "setGroup");
       await setGroup({ group });
@@ -744,7 +1298,7 @@ function renderProfile(user) {
     try {
       const setGroup = httpsCallable(fns, "setGroup");
       await setGroup({ group: "" });
-      if (groupInputEl) groupInputEl.value = "";
+      setGroupControls(null);
       groupMsgEl.innerHTML = `<div style="color:#0a7a2f;">Cleared.</div>`;
     } catch (err) {
       console.error(err);
@@ -803,6 +1357,154 @@ function renderProfile(user) {
       `;
     }
   );
+}
+
+function renderLeaderboard(user) {
+  clearUpcomingEventsListener();
+  clearEventMarketsListener();
+  clearProfileListeners();
+  clearGroupLeaderboardListener();
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+        <div>
+          <div style="font-size: 18px; font-weight: 750;">Leaderboard</div>
+          <div id="lbHint" style="opacity: 0.8; margin-top: 4px; font-size: 12px;">Group leaderboard.</div>
+        </div>
+        <div style="display:flex; gap: 10px; align-items:center;">
+          <button id="backToEvents">Back to events</button>
+          <button id="goToProfile" style="opacity:0.9;">Profile</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+          <div style="font-size: 16px; font-weight: 750;">Group leaderboard</div>
+          <div id="lbStatus" style="opacity: 0.8;"></div>
+        </div>
+        <div id="lbList" style="margin-top: 12px; display:flex; flex-direction:column; gap: 10px;"></div>
+        <div id="lbMsg" style="margin-top: 10px;"></div>
+      </div>
+    </section>
+  `;
+
+  document.querySelector("#backToEvents").onclick = () => setView("dashboard", user);
+  document.querySelector("#goToProfile").onclick = () => setView("profile", user);
+
+  const hintEl = document.querySelector("#lbHint");
+  const statusEl = document.querySelector("#lbStatus");
+  const listEl = document.querySelector("#lbList");
+  const msgEl = document.querySelector("#lbMsg");
+
+  statusEl.textContent = "Loading…";
+
+  // Keep this view in sync with the user's group.
+  unsubscribeAccount = onSnapshot(
+    doc(db, "users", user.uid),
+    (snap) => {
+      const g = snap.data()?.group;
+      currentGroup = typeof g === "string" && g ? g : null;
+      startGroupLeaderboard(currentGroup, { hintEl, statusEl, listEl, msgEl });
+    },
+    (err) => {
+      console.error(err);
+      startGroupLeaderboard(null, { hintEl, statusEl, listEl, msgEl });
+    }
+  );
+}
+
+async function renderPreviousResults(user) {
+  clearUpcomingEventsListener();
+  clearEventMarketsListener();
+  clearProfileListeners();
+  clearGroupLeaderboardListener();
+
+  mainEl.innerHTML = `
+    <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
+      <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+        <div>
+          <div style="font-size: 18px; font-weight: 750;">Previous Results</div>
+          <div id="prHint" style="opacity: 0.8; margin-top: 4px; font-size: 12px;">UFC 325 points for og_bjorgies</div>
+        </div>
+        <div style="display:flex; gap: 10px; align-items:center;">
+          <button id="backToEvents">Back to events</button>
+          <button id="goToProfile" style="opacity:0.9;">Profile</button>
+        </div>
+      </div>
+
+      <div id="prStatus" style="margin-top: 16px; opacity: 0.8;">Loading…</div>
+      <div id="prRankings" style="margin-top: 12px;"></div>
+      <div id="prFightStats" style="margin-top: 24px;"></div>
+    </section>
+  `;
+
+  document.querySelector("#backToEvents").onclick = () => setView("dashboard", user);
+  document.querySelector("#goToProfile").onclick = () => setView("profile", user);
+
+  const statusEl = document.querySelector("#prStatus");
+  const rankingsEl = document.querySelector("#prRankings");
+  const fightStatsEl = document.querySelector("#prFightStats");
+
+  try {
+    const getUfc325Results = httpsCallable(fns, "getUfc325Results");
+    const res = await getUfc325Results({ group: "og_bjorgies" });
+    const data = res.data || {};
+    const { ranked = [], fightStats = [], group = "og_bjorgies", memberCount = 0 } = data;
+
+    statusEl.textContent = `UFC 325 points • ${memberCount} member${memberCount === 1 ? "" : "s"} in ${group}`;
+
+    const rankingsHtml =
+      ranked.length === 0
+        ? `<div style="opacity:0.8; padding: 12px 0;">No members in this group placed UFC 325 bets.</div>`
+        : ranked
+            .map((r, idx) => {
+              const isMe = currentUser?.uid && r.uid === currentUser.uid;
+              return `
+                <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.18); border-radius: 12px;">
+                  <div style="display:flex; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
+                    <div style="font-weight: 750;">#${idx + 1} ${r.name}${isMe ? " (you)" : ""}</div>
+                    <div style="opacity:0.9;">Score: <strong>${r.score}</strong> / ${fightStats.length}</div>
+                  </div>
+                </article>
+              `;
+            })
+            .join("");
+
+    rankingsEl.innerHTML = `
+      <div style="font-size: 16px; font-weight: 750; margin-bottom: 10px;">UFC 325 points — rankings</div>
+      <div style="display:flex; flex-direction:column; gap: 10px;">${rankingsHtml}</div>
+    `;
+
+    const fightStatsHtml = fightStats
+      .map((f) => {
+        const voteLines = f.options
+          .map((opt) => {
+            const count = f.votesByOption[opt] || 0;
+            const isWinner = opt === f.winningOption;
+            return `<span>${opt}: <strong>${count}</strong>${isWinner ? " ✓" : ""}</span>`;
+          })
+          .join(" • ");
+        return `
+          <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.18); border-radius: 12px;">
+            <div style="font-weight: 750;">${f.fightName}</div>
+            <div style="opacity: 0.85; font-size: 13px; margin-top: 6px;">Votes: ${voteLines}</div>
+            <div style="opacity: 0.75; font-size: 12px; margin-top: 4px;">Winner: ${f.winningOption} • ${f.totalBets} bet${f.totalBets === 1 ? "" : "s"} total</div>
+          </article>
+        `;
+      })
+      .join("");
+
+    fightStatsEl.innerHTML = `
+      <div style="font-size: 16px; font-weight: 750; margin-bottom: 10px;">Fight stats</div>
+      <div style="display:flex; flex-direction:column; gap: 10px;">${fightStatsHtml}</div>
+    `;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "Failed to load";
+    rankingsEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+    fightStatsEl.innerHTML = "";
+  }
 }
 
 function americanToDecimal(american) {
@@ -910,20 +1612,44 @@ function renderEvent(user, eventId) {
         const m = d.data() || {};
         const question = m.question || "Market";
         const closesAt = fmtTs(m.closesAt);
+        const kind = String(m.kind || "").toLowerCase();
         const opts = Array.isArray(m.options) ? m.options : [];
+        const scoreMax = Number.isFinite(Number(m.scoreMax)) ? Number(m.scoreMax) : 50;
+        const scoreHomeLabel = m.homeTeam || ev.homeTeam || "Home";
+        const scoreAwayLabel = m.awayTeam || ev.awayTeam || "Away";
 
-        const optionRows = opts.map((opt) => {
-          const odds = formatOdds(m, opt);
-          return `
-            <div style="display:flex; align-items:center; justify-content:space-between; gap: 12px; padding: 10px; border: 1px solid rgba(127,127,127,0.18); border-radius: 10px;">
-              <div>
-                <div style="font-weight: 750;">${opt}</div>
-                <div style="opacity: 0.8; font-size: 12px;">Odds (${odds.oddsType}): ${odds.label}</div>
+        const optionRows =
+          kind === "score"
+            ? `
+              <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap; padding: 10px; border: 1px solid rgba(127,127,127,0.18); border-radius: 10px;">
+                <div style="display:flex; gap: 10px; flex-wrap: wrap; align-items:flex-end;">
+                  <label style="display:flex; flex-direction:column; gap: 6px;">
+                    <span style="opacity: 0.85; font-size: 12px;">${scoreHomeLabel}</span>
+                    <input id="score_home_${d.id}" type="number" min="0" max="${scoreMax}" step="1" inputmode="numeric" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 120px;" placeholder="0" />
+                  </label>
+                  <div style="opacity: 0.85; padding: 0 4px 10px 4px; font-weight: 850;">-</div>
+                  <label style="display:flex; flex-direction:column; gap: 6px;">
+                    <span style="opacity: 0.85; font-size: 12px;">${scoreAwayLabel}</span>
+                    <input id="score_away_${d.id}" type="number" min="0" max="${scoreMax}" step="1" inputmode="numeric" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 120px;" placeholder="0" />
+                  </label>
+                </div>
+                <button data-bet-score-btn="1" data-market-id="${d.id}">Bet</button>
               </div>
-              <button data-bet-btn="1" data-market-id="${d.id}" data-option="${opt}">Bet</button>
-            </div>
-          `;
-        }).join("");
+            `
+            : opts
+                .map((opt) => {
+                  const odds = formatOdds(m, opt);
+                  return `
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap: 12px; padding: 10px; border: 1px solid rgba(127,127,127,0.18); border-radius: 10px;">
+                      <div>
+                        <div style="font-weight: 750;">${opt}</div>
+                        <div style="opacity: 0.8; font-size: 12px;">Odds (${odds.oddsType}): ${odds.label}</div>
+                      </div>
+                      <button data-bet-btn="1" data-market-id="${d.id}" data-option="${opt}">Bet</button>
+                    </div>
+                  `;
+                })
+                .join("");
 
         return `
           <article style="padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
@@ -959,15 +1685,16 @@ function renderEvent(user, eventId) {
 
   marketsListEl.onclick = async (e) => {
     const btn = e.target?.closest?.("[data-bet-btn]");
-    if (!btn) return;
+    const scoreBtn = e.target?.closest?.("[data-bet-score-btn]");
+    if (!btn && !scoreBtn) return;
 
-    const marketId = btn.getAttribute("data-market-id");
-    const option = btn.getAttribute("data-option");
+    const marketId = (btn || scoreBtn).getAttribute("data-market-id");
+    const option = btn ? btn.getAttribute("data-option") : null;
     const stakeEl = document.querySelector(`#stake_${CSS.escape(marketId)}`);
     const stake = Number(stakeEl?.value || "");
 
     betMsgEl.textContent = "";
-    if (!marketId || !option) return;
+    if (!marketId) return;
     if (!Number.isInteger(stake) || stake <= 0) {
       betMsgEl.innerHTML = `<div style="color:#b00020;">Enter a valid stake amount.</div>`;
       return;
@@ -978,8 +1705,26 @@ function renderEvent(user, eventId) {
     }
 
     try {
-      btn.disabled = true;
-      btn.textContent = "Placing…";
+      const activeBtn = btn || scoreBtn;
+      activeBtn.disabled = true;
+      activeBtn.textContent = "Placing…";
+
+      let payload = null;
+      if (scoreBtn) {
+        const homeEl = document.querySelector(`#score_home_${CSS.escape(marketId)}`);
+        const awayEl = document.querySelector(`#score_away_${CSS.escape(marketId)}`);
+        const hs = Number(homeEl?.value || "");
+        const as = Number(awayEl?.value || "");
+        if (!Number.isInteger(hs) || hs < 0 || !Number.isInteger(as) || as < 0) {
+          betMsgEl.innerHTML = `<div style="color:#b00020;">Enter a valid score (0 or more) for both teams.</div>`;
+          return;
+        }
+        payload = { marketId, stake, homeScore: hs, awayScore: as };
+      } else {
+        if (!option) return;
+        payload = { marketId, option, stake };
+      }
+
       if (isGuest) {
         if (!Number.isInteger(guestBalance)) guestBalance = STARTING_BALANCE;
         if (stake > guestBalance) throw new Error("Stake exceeds your balance.");
@@ -989,22 +1734,24 @@ function renderEvent(user, eventId) {
         eventBalanceValEl.textContent = String(guestBalance);
         guestPendingBets.push({
           marketId,
-          option,
+          option: scoreBtn ? `${payload.homeScore}-${payload.awayScore}` : option,
+          ...(scoreBtn ? { homeScore: payload.homeScore, awayScore: payload.awayScore } : {}),
           stake,
           createdAt: new Date().toISOString(),
         });
         betMsgEl.innerHTML = `<div style="color:#0a7a2f;">Guest bet placed (not saved). Balance updated locally.</div>`;
       } else {
         const placeBet = httpsCallable(fns, "placeBet");
-        const res = await placeBet({ marketId, option, stake });
+        const res = await placeBet(payload);
         betMsgEl.innerHTML = `<div style="color:#0a7a2f;">Bet placed (${res.data?.betId || "ok"}). Balance will update.</div>`;
       }
     } catch (err) {
       console.error(err);
       betMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
     } finally {
-      btn.disabled = false;
-      btn.textContent = "Bet";
+      const activeBtn = btn || scoreBtn;
+      activeBtn.disabled = false;
+      activeBtn.textContent = "Bet";
     }
   };
 }
@@ -1032,6 +1779,8 @@ async function renderLoggedIn(user, profile) {
   document.querySelector("#logout").onclick = async () => {
     await signOut(auth);
   };
+  setLeaderboardTabVisible(true);
+  setPreviousResultsTabVisible(true);
   const accountMetaEl = document.querySelector("#accountMeta");
 
   try {
@@ -1103,6 +1852,8 @@ function renderAwaitingApproval(user, profile) {
     </div>
     <button id="logout">Logout</button>
   `;
+  setLeaderboardTabVisible(true);
+  setPreviousResultsTabVisible(true);
   document.querySelector("#logout").onclick = async () => {
     await signOut(auth);
   };
