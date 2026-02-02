@@ -323,6 +323,42 @@ exports.placeBet = onCall(async (request) => {
   return { betId };
 });
 
+exports.setEventResult = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in required");
+
+  const { eventId, result } = request.data || {};
+  if (!eventId || typeof eventId !== "string") {
+    throw new HttpsError("invalid-argument", "eventId required");
+  }
+  if (typeof result !== "string") {
+    throw new HttpsError("invalid-argument", "result must be a string");
+  }
+
+  const trimmedResult = result.trim();
+  if (trimmedResult.length > 500) {
+    throw new HttpsError("invalid-argument", "result too long (max 500 characters)");
+  }
+
+  const eventRef = db.collection("events").doc(eventId);
+
+  await db.runTransaction(async (tx) => {
+    await requireAdmin(tx, uid);
+
+    const eventSnap = await tx.get(eventRef);
+    if (!eventSnap.exists) throw new HttpsError("not-found", "Event not found");
+
+    tx.update(eventRef, {
+      result: trimmedResult || null,
+      resultSetAt: trimmedResult ? FieldValue.serverTimestamp() : null,
+      resultSetBy: trimmedResult ? uid : null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+
+  return { ok: true };
+});
+
 exports.settleMarket = onCall(async (request) => {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError("unauthenticated", "Sign in required");

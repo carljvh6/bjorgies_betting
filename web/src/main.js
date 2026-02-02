@@ -29,6 +29,7 @@ let unsubscribeGroupLeaderboard = null;
 let groupLeaderboardGroup = null;
 let currentBalance = null;
 let currentGroup = null;
+let currentRole = null;
 let headerAccountMetaEl = null;
 const eventsCache = new Map(); // eventId -> event data
 
@@ -428,6 +429,7 @@ function renderDashboard(user) {
         const status = ev.status || "";
         const when = fmtTs(ev.startTime);
         const venue = ev.venue || "";
+        const result = ev.result || "";
 
         return `
           <article data-event-id="${d.id}" style="padding: 12px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; cursor: pointer;">
@@ -442,6 +444,7 @@ function renderDashboard(user) {
               ${(league || status) && venue ? `<span> • </span>` : ""}
               ${venue ? `<span>${venue}</span>` : ""}
             </div>
+            ${result ? `<div style="margin-top: 8px; padding: 8px 10px; background: rgba(10, 122, 47, 0.1); border-radius: 8px; font-size: 13px;"><strong>Result:</strong> ${result}</div>` : ""}
           </article>
         `;
       });
@@ -843,6 +846,7 @@ function renderEvent(user, eventId) {
   const title = ev.name || eventId;
   const when = fmtTs(ev.startTime);
   const league = ev.league || ev.sport || "";
+  const existingResult = ev.result || "";
 
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
@@ -858,6 +862,24 @@ function renderEvent(user, eventId) {
           <div style="opacity: 0.8;">Balance: <span id="eventBalanceVal">-</span></div>
           <button id="backToEvents">Back</button>
         </div>
+      </div>
+
+      <div id="eventResultSection" style="margin-top: 16px; padding: 14px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; display:none;">
+        <div style="font-size: 16px; font-weight: 750;">Event Result</div>
+        <div id="eventResultDisplay" style="margin-top: 8px; opacity: 0.9;"></div>
+      </div>
+
+      <div id="adminResultPanel" style="margin-top: 16px; padding: 14px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px; display:none;">
+        <div style="font-size: 16px; font-weight: 850;">Admin: Set Event Result</div>
+        <div style="opacity: 0.8; margin-top: 4px; font-size: 12px;">Enter the final result or outcome of this event.</div>
+        <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap: wrap; align-items:flex-start;">
+          <textarea id="eventResultInput" rows="2" maxlength="500" placeholder="e.g. Team A wins 3-2" style="padding: 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,0.25); width: 100%; max-width: 400px; resize: vertical;"></textarea>
+        </div>
+        <div style="margin-top: 10px; display:flex; gap: 10px; flex-wrap: wrap;">
+          <button id="saveEventResult">Save Result</button>
+          <button id="clearEventResult" style="opacity:0.9;">Clear Result</button>
+        </div>
+        <div id="eventResultMsg" style="margin-top: 10px;"></div>
       </div>
 
       <div style="margin-top: 16px;">
@@ -877,9 +899,83 @@ function renderEvent(user, eventId) {
   const marketsStatusEl = document.querySelector("#marketsStatus");
   const marketsListEl = document.querySelector("#marketsList");
   const betMsgEl = document.querySelector("#betMsg");
+  const eventResultSectionEl = document.querySelector("#eventResultSection");
+  const eventResultDisplayEl = document.querySelector("#eventResultDisplay");
+  const adminResultPanelEl = document.querySelector("#adminResultPanel");
+  const eventResultInputEl = document.querySelector("#eventResultInput");
+  const eventResultMsgEl = document.querySelector("#eventResultMsg");
 
   const balText = currentBalance == null ? "-" : String(currentBalance);
   eventBalanceValEl.textContent = balText;
+
+  // Show existing result if available
+  const updateResultDisplay = (result) => {
+    if (result) {
+      eventResultSectionEl.style.display = "block";
+      eventResultDisplayEl.textContent = result;
+    } else {
+      eventResultSectionEl.style.display = "none";
+      eventResultDisplayEl.textContent = "";
+    }
+  };
+
+  updateResultDisplay(existingResult);
+  if (eventResultInputEl) eventResultInputEl.value = existingResult;
+
+  // Show admin panel if user is admin
+  if (currentRole === "admin" && !isGuest) {
+    adminResultPanelEl.style.display = "block";
+
+    document.querySelector("#saveEventResult").onclick = async () => {
+      const result = eventResultInputEl.value.trim();
+      eventResultMsgEl.innerHTML = "";
+
+      const saveBtn = document.querySelector("#saveEventResult");
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving…";
+
+      try {
+        const setEventResult = httpsCallable(fns, "setEventResult");
+        await setEventResult({ eventId, result });
+        eventResultMsgEl.innerHTML = `<div style="color:#0a7a2f;">Result saved.</div>`;
+        updateResultDisplay(result);
+        // Update cache
+        const cached = eventsCache.get(eventId);
+        if (cached) cached.result = result;
+      } catch (err) {
+        console.error(err);
+        eventResultMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save Result";
+      }
+    };
+
+    document.querySelector("#clearEventResult").onclick = async () => {
+      eventResultMsgEl.innerHTML = "";
+
+      const clearBtn = document.querySelector("#clearEventResult");
+      clearBtn.disabled = true;
+      clearBtn.textContent = "Clearing…";
+
+      try {
+        const setEventResult = httpsCallable(fns, "setEventResult");
+        await setEventResult({ eventId, result: "" });
+        eventResultInputEl.value = "";
+        eventResultMsgEl.innerHTML = `<div style="color:#0a7a2f;">Result cleared.</div>`;
+        updateResultDisplay("");
+        // Update cache
+        const cached = eventsCache.get(eventId);
+        if (cached) cached.result = null;
+      } catch (err) {
+        console.error(err);
+        eventResultMsgEl.innerHTML = `<div style="color:#b00020;">${err?.code || "error"}: ${err?.message || String(err)}</div>`;
+      } finally {
+        clearBtn.disabled = false;
+        clearBtn.textContent = "Clear Result";
+      }
+    };
+  }
 
   marketsStatusEl.textContent = "Loading…";
 
@@ -1067,6 +1163,8 @@ async function renderLoggedIn(user, profile) {
       currentBalance = Number.isFinite(bal) ? bal : null;
       const g = snap.data()?.group;
       currentGroup = typeof g === "string" && g ? g : null;
+      const r = snap.data()?.role;
+      currentRole = typeof r === "string" && r ? r : "user";
       updateHeaderMeta();
 
       const profileBalEl = document.querySelector("#balanceVal");
