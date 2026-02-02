@@ -17,6 +17,7 @@
     "seed:springboks": "node scripts/seedSpringboksRugby.js",
     "seed:epl": "node scripts/seedEpl2025_26.js",
     "seed:boxing": "node scripts/seedBoxingDec2025.js",
+    "seed:f12026": "node scripts/seedF12026.js",
     "seed:t20wc2026": "node scripts/seedT20WorldCup2026.js",
     "settle:ufc325": "node scripts/settleUfc325.js"
   },

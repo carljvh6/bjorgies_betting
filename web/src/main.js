@@ -43,6 +43,7 @@ let eventsSportFilter = (() => {
     if (raw === "soccer") return "soccer";
     if (raw === "boxing") return "boxing";
     if (raw === "cricket") return "cricket";
+    if (raw === "f1") return "f1";
     return "mma";
   } catch {
     return "mma";
@@ -164,6 +165,7 @@ function renderSuggest(user) {
                 <option value="soccer">Soccer</option>
                 <option value="boxing">Boxing</option>
                 <option value="cricket">Cricket</option>
+                <option value="f1">F1</option>
                 <option value="other">Other</option>
               </select>
             </label>
@@ -825,6 +827,7 @@ function renderDashboard(user) {
   const isSoccer = eventsSportFilter === "soccer";
   const isBoxing = eventsSportFilter === "boxing";
   const isCricket = eventsSportFilter === "cricket";
+  const isF1 = eventsSportFilter === "f1";
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
       <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
@@ -840,6 +843,7 @@ function renderDashboard(user) {
             <button id="sportTabSoccer" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isSoccer ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Soccer</button>
             <button id="sportTabBoxing" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isBoxing ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Boxing</button>
             <button id="sportTabCricket" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isCricket ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Cricket</button>
+            <button id="sportTabF1" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isF1 ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">F1</button>
           </div>
           <div id="eventsStatus" style="opacity: 0.8;"></div>
         </div>
@@ -855,6 +859,7 @@ function renderDashboard(user) {
   const sportTabSoccerEl = document.querySelector("#sportTabSoccer");
   const sportTabBoxingEl = document.querySelector("#sportTabBoxing");
   const sportTabCricketEl = document.querySelector("#sportTabCricket");
+  const sportTabF1El = document.querySelector("#sportTabF1");
   const suggestBtnEl = document.querySelector("#suggestBtn");
 
   if (suggestBtnEl) {
@@ -883,6 +888,11 @@ function renderDashboard(user) {
   };
   sportTabCricketEl.onclick = () => {
     eventsSportFilter = "cricket";
+    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+    renderDashboard(user);
+  };
+  sportTabF1El.onclick = () => {
+    eventsSportFilter = "f1";
     try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
     renderDashboard(user);
   };
@@ -916,7 +926,7 @@ function renderDashboard(user) {
         const sport = String(ev.sport || "").toLowerCase();
         if (eventsSportFilter && sport && sport !== eventsSportFilter) continue;
         // If sport is missing, treat it as MMA to keep legacy docs visible under MMA.
-        if ((eventsSportFilter === "rugby" || eventsSportFilter === "soccer" || eventsSportFilter === "boxing" || eventsSportFilter === "cricket") && !sport) continue;
+        if ((eventsSportFilter === "rugby" || eventsSportFilter === "soccer" || eventsSportFilter === "boxing" || eventsSportFilter === "cricket" || eventsSportFilter === "f1") && !sport) continue;
 
         includedCount += 1;
 
@@ -1009,7 +1019,7 @@ function renderDashboard(user) {
               ${(league || status) && venue ? `<span> • </span>` : ""}
               ${venue ? `<span>${venue}</span>` : ""}
               ${(league || status || venue) ? `<span> • </span>` : ""}
-              <span>${g.fights.length} fight${g.fights.length === 1 ? "" : "s"}</span>
+              <span>${g.fights.length} ${(league || "").toLowerCase().includes("f1") ? "race" : "fight"}${g.fights.length === 1 ? "" : "s"}</span>
             </div>
             <div style="margin-top: 10px; display:flex; flex-direction:column; gap: 8px;">
               ${fightsHtml}
