@@ -57,27 +57,23 @@ const guestPendingBets = []; // local-only; cleared on refresh
 
 const appEl = document.querySelector("#app");
 appEl.innerHTML = `
-  <div style="max-width: 980px; margin: 32px auto; padding: 0 16px; text-align: left;">
-    <header style="display:flex; align-items:center; justify-content:space-between; gap: 16px;">
-      <div>
-        <div style="font-size: 28px; font-weight: 750; letter-spacing: -0.02em;">Bjorgies betting</div>
-        <div id="subtitle" style="opacity: 0.8; margin-top: 4px;">Pick winners. Track bets. Get paid.</div>
+  <div class="app-container">
+    <header class="app-header">
+      <div class="app-header-brand">
+        <div class="app-title">Bjorgies betting</div>
+        <div id="subtitle" class="app-subtitle">Pick winners. Track bets. Get paid.</div>
       </div>
-      <div style="display:flex; align-items:center; gap: 16px;">
-        <img
-          src="/bjorn.webp"
-          alt="Bjorgies betting"
-          style="width: 88px; height: 88px; border-radius: 14px; object-fit: cover;"
-        />
-        <div style="display:flex; align-items:center; gap: 8px;">
+      <div class="app-header-right">
+        <img src="/bjorn.webp" alt="Bjorgies betting" class="app-logo" />
+        <div class="app-nav-tabs">
           <button id="leaderboardTab" style="display:none;">Leaderboard</button>
           <button id="previousResultsTab" style="display:none;">Previous Results</button>
         </div>
-        <div id="authArea" style="display:flex; align-items:center; gap: 12px;"></div>
+        <div id="authArea" class="auth-area"></div>
       </div>
     </header>
 
-    <main id="main" style="margin-top: 24px;"></main>
+    <main id="main" class="app-main"></main>
   </div>
 `;
 
@@ -602,7 +598,7 @@ function renderLoggedOut() {
   guestPendingBets.length = 0;
 
   authAreaEl.innerHTML = `
-    <div style="display:flex; gap: 8px;">
+    <div class="auth-buttons">
       <button id="login">Login</button>
       <button id="signupStart">Sign up</button>
       <button id="guestStart" style="opacity:0.9;">Enter as guest</button>
@@ -818,16 +814,19 @@ function renderSignup(user) {
   };
 }
 
+const SPORT_TABS = [
+  { id: "mma", label: "MMA" },
+  { id: "rugby", label: "Rugby" },
+  { id: "soccer", label: "Soccer" },
+  { id: "boxing", label: "Boxing" },
+  { id: "cricket", label: "Cricket" },
+  { id: "f1", label: "F1" },
+];
+
 function renderDashboard(user) {
   clearUpcomingEventsListener();
   clearEventMarketsListener();
 
-  const isMma = eventsSportFilter === "mma";
-  const isRugby = eventsSportFilter === "rugby";
-  const isSoccer = eventsSportFilter === "soccer";
-  const isBoxing = eventsSportFilter === "boxing";
-  const isCricket = eventsSportFilter === "cricket";
-  const isF1 = eventsSportFilter === "f1";
   mainEl.innerHTML = `
     <section style="padding: 16px; border: 1px solid rgba(127,127,127,0.25); border-radius: 12px;">
       <div style="display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; flex-wrap: wrap;">
@@ -837,13 +836,8 @@ function renderDashboard(user) {
         </div>
         <div style="display:flex; align-items:center; gap: 12px; flex-wrap: wrap; justify-content:flex-end;">
           ${!isGuest && currentUser?.uid && currentGroup ? `<button id="suggestBtn" style="opacity:0.95;">Suggest</button>` : ""}
-          <div style="display:flex; gap: 8px; padding: 4px; border: 1px solid rgba(127,127,127,0.18); border-radius: 999px;">
-            <button id="sportTabMma" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isMma ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">MMA</button>
-            <button id="sportTabRugby" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isRugby ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Rugby</button>
-            <button id="sportTabSoccer" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isSoccer ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Soccer</button>
-            <button id="sportTabBoxing" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isBoxing ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Boxing</button>
-            <button id="sportTabCricket" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isCricket ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">Cricket</button>
-            <button id="sportTabF1" style="padding: 8px 12px; border-radius: 999px; border: 0; ${isF1 ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">F1</button>
+          <div id="sportTabsContainer" class="sport-tabs" style="display:flex; gap: 8px; padding: 4px; border: 1px solid rgba(127,127,127,0.18); border-radius: 999px;">
+            <span id="sportTabsPlaceholder" style="opacity: 0.7;">Loading…</span>
           </div>
           <div id="eventsStatus" style="opacity: 0.8;"></div>
         </div>
@@ -854,45 +848,19 @@ function renderDashboard(user) {
 
   const eventsStatusEl = document.querySelector("#eventsStatus");
   const eventsListEl = document.querySelector("#eventsList");
-  const sportTabMmaEl = document.querySelector("#sportTabMma");
-  const sportTabRugbyEl = document.querySelector("#sportTabRugby");
-  const sportTabSoccerEl = document.querySelector("#sportTabSoccer");
-  const sportTabBoxingEl = document.querySelector("#sportTabBoxing");
-  const sportTabCricketEl = document.querySelector("#sportTabCricket");
-  const sportTabF1El = document.querySelector("#sportTabF1");
+  const sportTabsContainerEl = document.querySelector("#sportTabsContainer");
   const suggestBtnEl = document.querySelector("#suggestBtn");
 
   if (suggestBtnEl) {
     suggestBtnEl.onclick = () => setView("suggest", user);
   }
 
-  sportTabMmaEl.onclick = () => {
-    eventsSportFilter = "mma";
-    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
-    renderDashboard(user);
-  };
-  sportTabRugbyEl.onclick = () => {
-    eventsSportFilter = "rugby";
-    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
-    renderDashboard(user);
-  };
-  sportTabSoccerEl.onclick = () => {
-    eventsSportFilter = "soccer";
-    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
-    renderDashboard(user);
-  };
-  sportTabBoxingEl.onclick = () => {
-    eventsSportFilter = "boxing";
-    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
-    renderDashboard(user);
-  };
-  sportTabCricketEl.onclick = () => {
-    eventsSportFilter = "cricket";
-    try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
-    renderDashboard(user);
-  };
-  sportTabF1El.onclick = () => {
-    eventsSportFilter = "f1";
+  sportTabsContainerEl.onclick = (e) => {
+    const btn = e.target?.closest?.("[data-sport]");
+    if (!btn) return;
+    const sport = btn.getAttribute("data-sport");
+    if (!sport) return;
+    eventsSportFilter = sport;
     try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
     renderDashboard(user);
   };
@@ -913,9 +881,37 @@ function renderDashboard(user) {
       eventsCache.clear();
 
       if (snap.empty) {
+        sportTabsContainerEl.innerHTML = "";
+        sportTabsContainerEl.style.display = "none";
+        eventsStatusEl.textContent = "";
         eventsListEl.innerHTML = `<div style="opacity:0.8; padding: 12px 0;">No upcoming events.</div>`;
         return;
       }
+
+      // Collect which sports have events (treat missing sport as mma for legacy docs)
+      const sportsWithEvents = new Set();
+      for (const d of snap.docs) {
+        const ev = d.data() || {};
+        const sport = String(ev.sport || "").toLowerCase() || "mma";
+        sportsWithEvents.add(sport);
+      }
+
+      // If current filter has no events, switch to first available
+      if (!sportsWithEvents.has(eventsSportFilter)) {
+        const first = SPORT_TABS.find((t) => sportsWithEvents.has(t.id));
+        eventsSportFilter = first ? first.id : "mma";
+        try { localStorage.setItem("eventsSportFilter", eventsSportFilter); } catch {}
+      }
+
+      // Render only tabs for sports that have events
+      const tabsHtml = SPORT_TABS.filter((t) => sportsWithEvents.has(t.id))
+        .map((t) => {
+          const active = eventsSportFilter === t.id;
+          return `<button data-sport="${t.id}" style="padding: 8px 12px; border-radius: 999px; border: 0; ${active ? "background: rgba(127,127,127,0.20); font-weight: 750;" : "background: transparent; opacity: 0.85;"}">${t.label}</button>`;
+        })
+        .join("");
+      sportTabsContainerEl.innerHTML = tabsHtml;
+      sportTabsContainerEl.style.display = tabsHtml ? "flex" : "none";
 
       const byCard = new Map(); // key -> { cardName, cardId, venue, league, status, startTime, fights: [] }
       let includedCount = 0;

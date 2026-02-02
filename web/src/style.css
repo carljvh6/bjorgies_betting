@@ -22,10 +22,15 @@ a:hover {
   color: #535bf2;
 }
 
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  overflow-x: hidden;
 }
 
 h1 {
@@ -38,6 +43,190 @@ h1 {
   margin: 0 auto;
   padding: 2rem;
   text-align: left;
+}
+
+/* App layout */
+.app-container {
+  max-width: 980px;
+  margin: 32px auto;
+  padding: 0 16px;
+  text-align: left;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.app-header-brand {
+  flex-shrink: 0;
+}
+
+.app-title {
+  font-size: 28px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.app-subtitle {
+  opacity: 0.8;
+  margin-top: 4px;
+}
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-logo {
+  width: 88px;
+  height: 88px;
+  border-radius: 14px;
+  object-fit: cover;
+}
+
+.app-nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-main {
+  margin-top: 24px;
+}
+
+/* Mobile responsive */
+@media (max-width: 640px) {
+  #app {
+    padding: 12px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+
+  .app-container {
+    margin: 16px auto;
+    padding: 0 12px;
+  }
+
+  .app-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+  }
+
+  .app-header-brand {
+    order: 1;
+  }
+
+  .app-title {
+    font-size: 22px;
+  }
+
+  .app-subtitle {
+    font-size: 14px;
+  }
+
+  .app-header-right {
+    order: 2;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .app-logo {
+    width: 56px;
+    height: 56px;
+    order: 1;
+  }
+
+  .app-nav-tabs {
+    order: 2;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .auth-area {
+    order: 3;
+    width: 100%;
+  }
+
+  .auth-buttons {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .auth-buttons button {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 14px;
+    font-size: 14px;
+  }
+
+  .auth-area > div:not(.auth-buttons) {
+    text-align: right;
+  }
+
+  .app-main {
+    margin-top: 16px;
+  }
+
+  /* Section cards */
+  .app-main section {
+    padding: 12px !important;
+  }
+
+  .app-main h1 {
+    font-size: 26px !important;
+    line-height: 1.2 !important;
+  }
+
+  /* Sport tabs - wrap on mobile */
+  .sport-tabs {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+
+  .sport-tabs button {
+    flex-shrink: 0;
+    min-height: 40px;
+  }
+
+  /* Form inputs full width on mobile */
+  .app-main input[type="text"],
+  .app-main input[type="number"],
+  .app-main input[type="datetime-local"],
+  .app-main select {
+    max-width: 100% !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+
+  /* Event/market cards */
+  .app-main article {
+    padding: 12px !important;
+  }
+
+  .app-main [data-event-id] {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 8px !important;
+  }
 }
 
 .logo {
@@ -71,6 +260,13 @@ button {
   background-color: #1a1a1a;
   cursor: pointer;
   transition: border-color 0.25s;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  button {
+    min-height: 44px;
+  }
 }
 button:hover {
   border-color: #646cff;
